@@ -1,0 +1,20 @@
+[package]
+name = "coaming_nsexec"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[profile.release]
+panic = "abort"
+
+[lib]
+name = "coaming_nsexec"
+crate-type = ["staticlib", "rlib"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"

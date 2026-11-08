@@ -1,0 +1,6 @@
+target/
+native/nsexec/target/
+.superpowers/
+docs/superpowers/
+.mvn/target/
+.openidea/
