@@ -78,7 +78,7 @@
             <extensions>true</extensions>
             <configuration>
               <imageName>coaming</imageName>
-              <mainClass>io.github.huahill.coaming.ProbeMain</mainClass>
+              <mainClass>io.github.huahill.coaming.CoamingMain</mainClass>
             </configuration>
             <executions>
               <execution>
