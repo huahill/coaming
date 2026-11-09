@@ -1,6 +1,7 @@
 package io.github.huahill.coaming.runtime;
 
 import io.github.huahill.coaming.json.Json;
+import io.github.huahill.coaming.oci.NamespacePlan;
 import io.github.huahill.coaming.oci.OciConfig;
 import io.github.huahill.coaming.oci.OciProcess;
 import java.io.IOException;
@@ -22,7 +23,7 @@ public final class ContainerRuntime {
         if (Files.exists(state)) {
             throw new IllegalStateException("container already exists: " + id);
         }
-        OciConfig.read(bundle);
+        OciConfig config = OciConfig.read(bundle);
         Files.createDirectories(state);
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
@@ -30,10 +31,15 @@ public final class ContainerRuntime {
         String cgroup = Cgroups.create(id);
         Files.writeString(state.resolve("cgroup"), cgroup);
         String program = Memfd.copyCurrentExecutable();
-        Process helper = new ProcessBuilder(
-                        program, "init", "--state", state.toString(), "--bundle", bundle.toAbsolutePath().toString())
-                .inheritIO()
-                .start();
+        List<String> command = new ArrayList<>();
+        command.add(program);
+        command.add("init");
+        command.add("--state");
+        command.add(state.toString());
+        command.add("--bundle");
+        command.add(bundle.toAbsolutePath().toString());
+        command.addAll(NamespacePlan.arguments(config.namespaces(), config.namespacesSpecified()));
+        Process helper = new ProcessBuilder(command).inheritIO().start();
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
             Files.writeString(state.resolve("status"), "failed");

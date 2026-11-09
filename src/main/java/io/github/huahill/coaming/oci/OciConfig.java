@@ -7,19 +7,26 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<String> namespaces, List<String> env) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
         Json process = root.field("process");
         Json rootfs = root.field("root");
-        List<String> namespaces = new ArrayList<>();
+        List<Namespace> namespaces = new ArrayList<>();
+        boolean namespacesSpecified = false;
         Json linux = root.optional("linux");
         if (linux != null) {
             Json values = linux.optional("namespaces");
             if (values instanceof Json.Arr arr) {
+                namespacesSpecified = true;
                 for (Json item : arr.items()) {
-                    namespaces.add(item.field("type").string());
+                    String path = null;
+                    Json pathValue = item.optional("path");
+                    if (pathValue != null && !pathValue.string().isBlank()) {
+                        path = pathValue.string();
+                    }
+                    namespaces.add(new Namespace(item.field("type").string(), path));
                 }
             }
         }
@@ -38,7 +45,7 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         if (envValue != null) {
             env = envValue.strings();
         }
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, env);
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env);
     }
 
     public Path root(Path bundle) {

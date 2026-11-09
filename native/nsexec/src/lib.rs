@@ -86,11 +86,57 @@ fn enter_container() {
     if args.is_empty() {
         unsafe { libc::_exit(75) };
     }
+    let (unshare, joins) = namespace_actions(&cmdline_parts());
     set_env("COAMING_INIT_STAGE", "jvm");
-    let flags = libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWPID;
+    let mut flags: libc::c_int = 0;
+    let mut new_pid = false;
+    for kind in &unshare {
+        if kind == "pid" {
+            new_pid = true;
+            continue;
+        }
+        flags |= clone_flag(kind);
+    }
+    let mut opened = Vec::new();
+    for (kind, path) in &joins {
+        let c_path = match std::ffi::CString::new(path.clone()) {
+            Ok(value) => value,
+            Err(_) => unsafe { libc::_exit(89) },
+        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            unsafe { libc::_exit(88) };
+        }
+        opened.push((kind.clone(), fd));
+    }
     unsafe {
-        if libc::unshare(flags) != 0 {
+        if flags != 0 && libc::unshare(flags) != 0 {
             libc::_exit(70);
+        }
+        let mut pid_join = -1;
+        let mut mount_join = -1;
+        for (kind, fd) in opened {
+            if kind == "pid" {
+                pid_join = fd;
+                continue;
+            }
+            if kind == "mount" {
+                mount_join = fd;
+                continue;
+            }
+            if libc::setns(fd, 0) != 0 {
+                libc::_exit(88);
+            }
+            libc::close(fd);
+        }
+        if new_pid && libc::unshare(libc::CLONE_NEWPID) != 0 {
+            libc::_exit(70);
+        }
+        if pid_join >= 0 && libc::setns(pid_join, 0) != 0 {
+            libc::_exit(88);
+        }
+        if pid_join >= 0 {
+            libc::close(pid_join);
         }
         let pid = libc::fork();
         if pid < 0 {
@@ -100,10 +146,74 @@ fn enter_container() {
             write_pid(&pid_path, pid);
             libc::_exit(0);
         }
+        if mount_join >= 0 && libc::setns(mount_join, 0) != 0 {
+            libc::_exit(88);
+        }
+        if mount_join >= 0 {
+            libc::close(mount_join);
+        }
         let mut argv: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
         argv.push(std::ptr::null());
         libc::execve(args[0].as_ptr(), argv.as_ptr(), environ());
         libc::_exit(72);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_actions(parts: &[String]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut unshare = Vec::new();
+    let mut joins = Vec::new();
+    let mut saw_unshare = false;
+    let mut index = 0usize;
+    while index < parts.len() {
+        match parts[index].as_str() {
+            "--unshare" => {
+                saw_unshare = true;
+                let Some(value) = parts.get(index + 1) else {
+                    unsafe { libc::_exit(89) };
+                };
+                if value != "none" {
+                    unshare.extend(
+                        value
+                            .split(',')
+                            .filter(|item| !item.is_empty())
+                            .map(str::to_string),
+                    );
+                }
+                index += 2;
+            }
+            "--join" => {
+                let Some(value) = parts.get(index + 1) else {
+                    unsafe { libc::_exit(89) };
+                };
+                let Some((kind, path)) = value.split_once('=') else {
+                    unsafe { libc::_exit(89) };
+                };
+                if kind.is_empty() || path.is_empty() {
+                    unsafe { libc::_exit(89) };
+                }
+                joins.push((kind.to_string(), path.to_string()));
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    if !saw_unshare {
+        unshare = vec!["pid".to_string(), "mount".to_string(), "uts".to_string()];
+    }
+    (unshare, joins)
+}
+
+#[cfg(target_os = "linux")]
+fn clone_flag(kind: &str) -> libc::c_int {
+    match kind {
+        "mount" => libc::CLONE_NEWNS,
+        "uts" => libc::CLONE_NEWUTS,
+        "ipc" => libc::CLONE_NEWIPC,
+        "network" => libc::CLONE_NEWNET,
+        "cgroup" => libc::CLONE_NEWCGROUP,
+        "pid" => libc::CLONE_NEWPID,
+        _ => unsafe { libc::_exit(89) },
     }
 }
 
