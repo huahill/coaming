@@ -44,6 +44,7 @@ unsafe extern "C" fn coaming_nsexec_init() {
     match first_argument().as_deref() {
         Some("probe") => run_probe(),
         Some("init") => enter_container(),
+        Some("exec-init") => enter_exec(),
         _ => {}
     }
 }
@@ -143,6 +144,252 @@ fn environ() -> *const *const libc::c_char {
         static environ: *mut *mut libc::c_char;
     }
     unsafe { environ.cast() }
+}
+
+#[cfg(target_os = "linux")]
+fn enter_exec() {
+    // The native image is dynamically linked. After joining the container
+    // mount namespace it cannot be executed again, so this single-threaded
+    // stage execs the user program directly.
+    let parts = cmdline_parts();
+    let mut target = None;
+    let mut pid_file = None;
+    let mut cwd = "/".to_string();
+    let mut envs = Vec::new();
+    let mut detach = false;
+    let mut user = Vec::new();
+    let mut index = 2usize;
+    while index < parts.len() {
+        match parts[index].as_str() {
+            "--pid" => {
+                target = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--pid-path" => {
+                pid_file = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--cwd" => {
+                cwd = parts.get(index + 1).cloned().unwrap_or_else(|| "/".to_string());
+                index += 2;
+            }
+            "--env" => {
+                if let Some(value) = parts.get(index + 1) {
+                    envs.push(value.clone());
+                }
+                index += 2;
+            }
+            "--detach" => {
+                detach = true;
+                index += 1;
+            }
+            "--" => {
+                user.extend(parts[index + 1..].iter().cloned());
+                break;
+            }
+            _ => unsafe { libc::_exit(82) },
+        }
+    }
+    let Some(target) = target else {
+        unsafe { libc::_exit(77) };
+    };
+    let Some(pid_file) = pid_file else {
+        unsafe { libc::_exit(78) };
+    };
+    if user.is_empty() {
+        unsafe { libc::_exit(82) };
+    }
+    let mut pipes = [0; 2];
+    unsafe {
+        if libc::pipe(pipes.as_mut_ptr()) != 0 {
+            libc::_exit(84);
+        }
+        let pid = libc::fork();
+        if pid < 0 {
+            libc::_exit(79);
+        }
+        if pid > 0 {
+            libc::close(pipes[1]);
+            let user_pid = read_i32(pipes[0]);
+            libc::close(pipes[0]);
+            let pid_path = std::ffi::CString::new(pid_file).expect("exec pid path");
+            write_pid(&pid_path, user_pid);
+            let status = wait_status(pid);
+            libc::_exit(if detach { 0 } else { status });
+        }
+        libc::close(pipes[0]);
+    }
+    let mounts = open_namespace(&target, "mnt", false);
+    let uts = open_namespace(&target, "uts", false);
+    let ipc = open_namespace(&target, "ipc", false);
+    let net = open_namespace(&target, "net", false);
+    let cgroup = open_namespace(&target, "cgroup", false);
+    let pidns = open_namespace(&target, "pid", true);
+    enter_namespace(mounts, false);
+    enter_namespace(uts, false);
+    enter_namespace(ipc, false);
+    enter_namespace(net, false);
+    enter_namespace(cgroup, false);
+    enter_namespace(pidns, true);
+    let grand = unsafe { libc::fork() };
+    if grand < 0 {
+        unsafe { libc::_exit(79) };
+    }
+    if grand > 0 {
+        let text = grand.to_string();
+        write_all(pipes[1], text.as_bytes());
+        unsafe { libc::close(pipes[1]) };
+        if detach {
+            unsafe { libc::_exit(0) };
+        }
+        let status = wait_status(grand);
+        unsafe { libc::_exit(status) };
+    }
+    unsafe { libc::close(pipes[1]) };
+    if cwd != "/" {
+        let path = match std::ffi::CString::new(cwd) {
+            Ok(value) => value,
+            Err(_) => unsafe { libc::_exit(87) },
+        };
+        if unsafe { libc::chdir(path.as_ptr()) } != 0 {
+            unsafe { libc::_exit(87) };
+        }
+    }
+    if let Some(program) = user.first().cloned() {
+        user[0] = resolve_program(&program, &envs);
+    }
+    let argv_owned: Vec<std::ffi::CString> = user
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) }))
+        .collect();
+    let env_owned: Vec<std::ffi::CString> = envs
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) }))
+        .collect();
+    let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|arg| arg.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    let mut envp: Vec<*const libc::c_char> = env_owned.iter().map(|arg| arg.as_ptr()).collect();
+    envp.push(std::ptr::null());
+    unsafe {
+        libc::execve(argv_owned[0].as_ptr(), argv.as_ptr(), envp.as_ptr());
+        libc::_exit(80);
+    }
+}
+
+
+#[cfg(target_os = "linux")]
+fn resolve_program(program: &str, env: &[String]) -> String {
+    if program.contains('/') {
+        return program.to_string();
+    }
+    let path = env
+        .iter()
+        .find_map(|item| item.strip_prefix("PATH="))
+        .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = format!("{dir}/{program}");
+        let Ok(path) = std::ffi::CString::new(candidate.clone()) else {
+            continue;
+        };
+        if unsafe { libc::access(path.as_ptr(), libc::X_OK) } == 0 {
+            return candidate;
+        }
+    }
+    program.to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn cmdline_parts() -> Vec<String> {
+    std::fs::read("/proc/self/cmdline")
+        .unwrap_or_default()
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| String::from_utf8(part.to_vec()).ok())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn open_namespace(pid: &str, name: &str, required: bool) -> i32 {
+    let path = std::ffi::CString::new(format!("/proc/{pid}/ns/{name}")).expect("namespace path");
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 && required {
+        unsafe { libc::_exit(76) };
+    }
+    fd
+}
+
+#[cfg(target_os = "linux")]
+fn enter_namespace(fd: i32, required: bool) {
+    if fd < 0 {
+        return;
+    }
+    let rc = unsafe { libc::setns(fd, 0) };
+    unsafe { libc::close(fd) };
+    if rc != 0 && required {
+        unsafe { libc::_exit(76) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_i32(fd: i32) -> i32 {
+    let mut buf = [0u8; 32];
+    let mut used = 0usize;
+    unsafe {
+        loop {
+            if used == buf.len() {
+                break;
+            }
+            let read = libc::read(fd, buf[used..].as_mut_ptr().cast(), buf.len() - used);
+            if read < 0 {
+                libc::_exit(86);
+            }
+            if read == 0 {
+                break;
+            }
+            used += read as usize;
+        }
+    }
+    let text = std::str::from_utf8(&buf[..used]).unwrap_or("");
+    text.trim().parse().unwrap_or_else(|_| unsafe { libc::_exit(86) })
+}
+
+#[cfg(target_os = "linux")]
+fn write_all(fd: i32, bytes: &[u8]) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let wrote = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        if wrote < 0 {
+            unsafe { libc::_exit(86) };
+        }
+        rest = &rest[wrote as usize..];
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_status(pid: i32) -> i32 {
+    let mut status = 0;
+    unsafe {
+        loop {
+            let rc = libc::waitpid(pid, &mut status, 0);
+            if rc < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                libc::_exit(85);
+            }
+            break;
+        }
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
+        } else {
+            1
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

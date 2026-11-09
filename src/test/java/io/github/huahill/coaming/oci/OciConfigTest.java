@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -29,6 +30,7 @@ class OciConfigTest {
         assertEquals(bundle.resolve("rootfs"), config.root(bundle));
         assertEquals("demo", config.hostname());
         assertEquals(ListOf("pid", "mount", "uts"), config.namespaces());
+        assertEquals(List.of(), config.env());
     }
 
     private static java.util.List<String> ListOf(String... values) {

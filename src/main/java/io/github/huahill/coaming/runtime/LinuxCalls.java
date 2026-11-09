@@ -40,6 +40,8 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
     private static final MethodHandle ERRNO_LOCATION = downcall("__errno_location", FunctionDescriptor.of(
             ValueLayout.ADDRESS));
+    private static final MethodHandle MEMFD_CREATE = downcall("memfd_create", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
 
     private static final int MS_REC = 16384;
     private static final int MS_PRIVATE = 1 << 18;
@@ -170,14 +172,21 @@ final class LinuxCalls {
     }
 
     static void exec(String[] args) {
+        exec(args, new String[0]);
+    }
+
+    static void exec(String[] args, String[] env) {
         Arena arena = Arena.global();
         MemorySegment argv = arena.allocate(ValueLayout.ADDRESS, args.length + 1L);
         for (int i = 0; i < args.length; i++) {
             argv.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(args[i]));
         }
         argv.setAtIndex(ValueLayout.ADDRESS, args.length, MemorySegment.NULL);
-        MemorySegment envp = arena.allocate(ValueLayout.ADDRESS, 1);
-        envp.setAtIndex(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+        MemorySegment envp = arena.allocate(ValueLayout.ADDRESS, env.length + 1L);
+        for (int i = 0; i < env.length; i++) {
+            envp.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(env[i]));
+        }
+        envp.setAtIndex(ValueLayout.ADDRESS, env.length, MemorySegment.NULL);
         int rc;
         try {
             rc = (int) EXECVE.invokeExact(arena.allocateFrom(args[0]), argv, envp);
@@ -185,6 +194,37 @@ final class LinuxCalls {
             throw new IllegalStateException("execve failed: " + failure, failure);
         }
         throw new IllegalStateException("execve " + args[0] + " returned " + rc + " errno=" + errno());
+    }
+
+    static int memfdCreate(String name) {
+        int fd;
+        try (Arena arena = Arena.ofConfined()) {
+            try {
+                fd = (int) MEMFD_CREATE.invokeExact(arena.allocateFrom(name), 1);
+            } catch (Throwable failure) {
+                throw new IllegalStateException("memfd_create failed", failure);
+            }
+        }
+        if (fd < 0) {
+            throw new IllegalStateException("memfd_create failed: " + errno());
+        }
+        return fd;
+    }
+
+    static void writeFully(int fd, byte[] bytes) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment data = arena.allocateFrom(ValueLayout.JAVA_BYTE, bytes);
+            long offset = 0;
+            while (offset < bytes.length) {
+                long wrote = (long) WRITE.invokeExact(fd, data.asSlice(offset), bytes.length - offset);
+                if (wrote < 0) {
+                    throw new IllegalStateException("write failed: " + errno());
+                }
+                offset += wrote;
+            }
+        } catch (Throwable failure) {
+            throw new IllegalStateException("write failed", failure);
+        }
     }
 
     static void mkdir(String path) {
@@ -224,9 +264,13 @@ final class LinuxCalls {
     }
 
     private static void close(int fd) {
+        int rc;
         try {
-            CLOSE.invokeExact(fd);
+            rc = (int) CLOSE.invokeExact(fd);
         } catch (Throwable ignored) {
+            return;
+        }
+        if (rc != 0) {
             // The operation that used the descriptor reports the real failure.
         }
     }

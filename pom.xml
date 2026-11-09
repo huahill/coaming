@@ -79,6 +79,9 @@
             <configuration>
               <imageName>coaming</imageName>
               <mainClass>io.github.huahill.coaming.CoamingMain</mainClass>
+              <buildArgs>
+                <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
+              </buildArgs>
             </configuration>
             <executions>
               <execution>

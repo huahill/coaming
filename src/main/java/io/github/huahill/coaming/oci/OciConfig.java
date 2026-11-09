@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<String> namespaces) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<String> namespaces, List<String> env) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -33,7 +33,12 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         if (hostnameValue != null) {
             hostname = hostnameValue.string();
         }
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces);
+        List<String> env = List.of();
+        Json envValue = process.optional("env");
+        if (envValue != null) {
+            env = envValue.strings();
+        }
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, env);
     }
 
     public Path root(Path bundle) {

@@ -1,36 +1,49 @@
 package io.github.huahill.coaming.runtime;
 
+import io.github.huahill.coaming.json.Json;
 import io.github.huahill.coaming.oci.OciConfig;
+import io.github.huahill.coaming.oci.OciProcess;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 public final class ContainerRuntime {
     private ContainerRuntime() {}
 
-    public static int create(Path root, Path bundle, String id) throws Exception {
+    public static int create(Path root, Path bundle, String id, Path pidFile) throws Exception {
         requireLinux();
         Path state = containerDir(root, id);
         if (Files.exists(state)) {
             throw new IllegalStateException("container already exists: " + id);
         }
-        OciConfig config = OciConfig.read(bundle);
+        OciConfig.read(bundle);
         Files.createDirectories(state);
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
         LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
         String cgroup = Cgroups.create(id);
         Files.writeString(state.resolve("cgroup"), cgroup);
+        String program = Memfd.copyCurrentExecutable();
         Process helper = new ProcessBuilder(
-                        executable(), "init", "--state", state.toString(), "--bundle", bundle.toAbsolutePath().toString())
+                        program, "init", "--state", state.toString(), "--bundle", bundle.toAbsolutePath().toString())
                 .inheritIO()
                 .start();
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
             Files.writeString(state.resolve("status"), "failed");
             throw new IllegalStateException("init helper exited " + helperExit);
+        }
+        if (pidFile != null) {
+            if (pidFile.getParent() != null) {
+                Files.createDirectories(pidFile.getParent());
+            }
+            Files.copy(state.resolve("pid"), pidFile, StandardCopyOption.REPLACE_EXISTING);
         }
         int pid = Integer.parseInt(Files.readString(state.resolve("pid")).trim());
         Cgroups.add(cgroup, pid);
@@ -40,6 +53,7 @@ public final class ContainerRuntime {
 
     public static int init(Path state, Path bundle) throws Exception {
         OciConfig config = OciConfig.read(bundle);
+        recordExecutable(state);
         int startFd = LinuxCalls.openStartFifo(state.resolve("start.fifo").toString());
         Files.writeString(state.resolve("status"), "created");
         LinuxCalls.readStartByte(startFd);
@@ -56,8 +70,42 @@ public final class ContainerRuntime {
         if (!"/".equals(config.cwd())) {
             LinuxCalls.chdir(config.cwd());
         }
-        LinuxCalls.exec(config.args().toArray(String[]::new));
+        String[] args = config.args().toArray(String[]::new);
+        if (args.length == 0) {
+            throw new IllegalStateException("container has no process args");
+        }
+        args[0] = resolveProgram(args[0], config.env());
+        LinuxCalls.exec(args, config.env().toArray(String[]::new));
         return 1;
+    }
+
+    public static int exec(Path root, String id, Path process, Path pidFile, boolean detach) throws Exception {
+        requireLinux();
+        int target = Integer.parseInt(Files.readString(requireContainer(root, id).resolve("pid")).trim());
+        OciProcess spec = OciProcess.parse(Files.readString(process));
+        if (spec.args().isEmpty()) {
+            throw new IllegalArgumentException("exec process has no args");
+        }
+        List<String> command = new ArrayList<>();
+        command.add(Memfd.copyCurrentExecutable());
+        command.add("exec-init");
+        command.add("--pid");
+        command.add(Integer.toString(target));
+        command.add("--pid-path");
+        command.add(pidFile.toAbsolutePath().toString());
+        command.add("--cwd");
+        command.add(spec.cwd());
+        for (String variable : spec.env()) {
+            command.add("--env");
+            command.add(variable);
+        }
+        if (detach) {
+            command.add("--detach");
+        }
+        command.add("--");
+        command.addAll(spec.args());
+        Process helper = new ProcessBuilder(command).inheritIO().start();
+        return helper.waitFor();
     }
 
     public static int start(Path root, String id) {
@@ -71,12 +119,23 @@ public final class ContainerRuntime {
         Path state = requireContainer(root, id);
         String status = Files.readString(state.resolve("status")).trim();
         String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
-        if ((status.equals("running") || status.equals("created")) && !pid.equals("0")
+        if (linuxHost() && (status.equals("running") || status.equals("created")) && !pid.equals("0")
                 && !Files.exists(Path.of("/proc").resolve(pid))) {
             status = "stopped";
             Files.writeString(state.resolve("status"), status);
         }
-        System.out.printf("{\"ociVersion\":\"1.2.0\",\"id\":\"%s\",\"status\":\"%s\",\"pid\":%s}%n", id, status, pid);
+        String bundle = text(state.resolve("bundle"));
+        String rootfs = "";
+        if (!bundle.isEmpty()) {
+            try {
+                rootfs = OciConfig.read(Path.of(bundle)).root(Path.of(bundle)).toString();
+            } catch (RuntimeException | IOException ignored) {
+                rootfs = "";
+            }
+        }
+        System.out.printf(
+                "{\"ociVersion\":\"1.2.0\",\"id\":\"%s\",\"status\":\"%s\",\"pid\":%s,\"bundle\":\"%s\",\"rootfs\":\"%s\"}%n",
+                escape(id), escape(status), pid, escape(bundle), escape(rootfs));
         return 0;
     }
 
@@ -87,23 +146,151 @@ public final class ContainerRuntime {
         return 0;
     }
 
-    public static int delete(Path root, String id) throws IOException {
+    public static int delete(Path root, String id, boolean force) throws IOException {
         Path state = requireContainer(root, id);
         String status = Files.readString(state.resolve("status")).trim();
-        if (!status.equals("stopped") && !status.equals("failed") && !status.equals("created")) {
-            if (Files.exists(state.resolve("pid"))) {
-                try {
-                    kill(root, id, "KILL");
-                } catch (RuntimeException ignored) {
-                    // The process may already have exited.
-                }
-            }
+        if (!force && "running".equals(status) && processAlive(state)) {
+            throw new IllegalStateException("container is running: " + id);
+        }
+        if (force || "created".equals(status) || "running".equals(status)) {
+            signalCreatedOrForced(root, id, state);
         }
         if (Files.exists(state.resolve("cgroup"))) {
             Cgroups.remove(Files.readString(state.resolve("cgroup")).trim());
         }
         deleteTree(state);
         return 0;
+    }
+
+    public static int update(Path root, String id, String resources, InputStream in) throws IOException {
+        Path state = requireContainer(root, id);
+        String json = "-".equals(resources)
+                ? new String(in.readAllBytes(), StandardCharsets.UTF_8)
+                : Files.readString(Path.of(resources));
+        if (!Files.exists(state.resolve("cgroup"))) {
+            throw new IllegalStateException("container has no cgroup: " + id);
+        }
+        Path cgroup = Path.of(Files.readString(state.resolve("cgroup")).trim());
+        Resources.apply(cgroup, Json.parse(json));
+        return 0;
+    }
+
+    public static int ps(Path root, String id) throws IOException {
+        Path state = requireContainer(root, id);
+        String status = Files.readString(state.resolve("status")).trim();
+        int pid = Files.exists(state.resolve("pid"))
+                ? Integer.parseInt(Files.readString(state.resolve("pid")).trim())
+                : 0;
+        boolean show = pid > 0 && ("running".equals(status) || "created".equals(status)) && alive(pid);
+        System.out.println(show ? "[" + pid + "]" : "[]");
+        return 0;
+    }
+
+    public static int events(Path root, String id, String interval, boolean stats) throws IOException, InterruptedException {
+        requireContainer(root, id);
+        if (stats) {
+            System.out.println(statsLine(id));
+            return 0;
+        }
+        long pause = intervalMillis(interval);
+        while (containerAlive(root, id)) {
+            System.out.println(statsLine(id));
+            System.out.flush();
+            Thread.sleep(pause);
+        }
+        return 0;
+    }
+
+    static String resolveProgram(String program, List<String> env) {
+        if (program.contains("/")) {
+            return program;
+        }
+        String path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        for (String item : env) {
+            if (item.startsWith("PATH=")) {
+                path = item.substring("PATH=".length());
+            }
+        }
+        for (String dir : path.split(":")) {
+            if (dir.isEmpty()) {
+                continue;
+            }
+            Path candidate = Path.of(dir, program);
+            if (Files.isExecutable(candidate)) {
+                return candidate.toString();
+            }
+        }
+        return program;
+    }
+
+    static long intervalMillis(String value) {
+        if (value == null || value.isBlank()) {
+            return 5000;
+        }
+        String text = value.trim();
+        if (text.endsWith("ms")) {
+            return Long.parseLong(text.substring(0, text.length() - 2));
+        }
+        if (text.endsWith("s")) {
+            return Long.parseLong(text.substring(0, text.length() - 1)) * 1000L;
+        }
+        if (text.endsWith("m")) {
+            return Long.parseLong(text.substring(0, text.length() - 1)) * 60_000L;
+        }
+        return Long.parseLong(text) * 1000L;
+    }
+
+    private static void signalCreatedOrForced(Path root, String id, Path state) {
+        if (!linuxHost() || !Files.exists(state.resolve("pid"))) {
+            return;
+        }
+        try {
+            kill(root, id, "KILL");
+        } catch (RuntimeException | IOException ignored) {
+            // The process may already have exited.
+        }
+    }
+
+    private static boolean processAlive(Path state) throws IOException {
+        if (!Files.exists(state.resolve("pid"))) {
+            return true;
+        }
+        return alive(Integer.parseInt(Files.readString(state.resolve("pid")).trim()));
+    }
+
+    private static boolean containerAlive(Path root, String id) throws IOException {
+        Path state = requireContainer(root, id);
+        String status = Files.readString(state.resolve("status")).trim();
+        return ("running".equals(status) || "created".equals(status)) && processAlive(state);
+    }
+
+    private static boolean alive(int pid) {
+        if (pid <= 0) {
+            return false;
+        }
+        if (!linuxHost()) {
+            return true;
+        }
+        return Files.exists(Path.of("/proc").resolve(Integer.toString(pid)));
+    }
+
+    private static String statsLine(String id) {
+        return "{\"type\":\"stats\",\"id\":\"" + escape(id) + "\",\"data\":{}}";
+    }
+
+    private static void recordExecutable(Path state) throws IOException {
+        Path self = Path.of("/proc/self/exe");
+        if (Files.exists(self)) {
+            Files.writeString(state.resolve("exe"), Files.readSymbolicLink(self).toString());
+        }
+    }
+
+    private static String text(Path path) throws IOException {
+        return Files.exists(path) ? Files.readString(path).trim() : "";
+    }
+
+    private static String escape(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
     }
 
     private static void waitUntil(Path state, String wanted, String failed) throws IOException, InterruptedException {
@@ -135,10 +322,6 @@ public final class ContainerRuntime {
         return state;
     }
 
-    private static String executable() {
-        return ProcessHandle.current().info().command().orElseThrow(() -> new IllegalStateException("cannot find own executable"));
-    }
-
     private static int signalNumber(String signal) {
         return switch (signal.toUpperCase(Locale.ROOT)) {
             case "TERM", "SIGTERM", "15" -> 15;
@@ -148,9 +331,13 @@ public final class ContainerRuntime {
     }
 
     private static void requireLinux() {
-        if (!System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux")) {
+        if (!linuxHost()) {
             throw new IllegalStateException("container commands require Linux");
         }
+    }
+
+    private static boolean linuxHost() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux");
     }
 
     private static void deleteTree(Path path) throws IOException {

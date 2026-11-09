@@ -37,6 +37,13 @@ public sealed interface Json {
         throw new IllegalArgumentException("expected string");
     }
 
+    default long longValue() {
+        if (this instanceof Num number) {
+            return number.value;
+        }
+        throw new IllegalArgumentException("expected integer");
+    }
+
     default List<String> strings() {
         if (!(this instanceof Arr arr)) {
             throw new IllegalArgumentException("expected array");
@@ -54,6 +61,8 @@ public sealed interface Json {
 
     record Str(String value) implements Json {}
 
+    record Num(long value) implements Json {}
+
     record Other() implements Json {}
 
     final class Parser {
@@ -69,7 +78,11 @@ public sealed interface Json {
             if (done()) {
                 throw new IllegalArgumentException("empty JSON");
             }
-            return switch (text.charAt(index)) {
+            char ch = text.charAt(index);
+            if (ch == '-' || (ch >= '0' && ch <= '9')) {
+                return number();
+            }
+            return switch (ch) {
                 case '{' -> object();
                 case '[' -> array();
                 case '"' -> new Str(stringLiteral());
@@ -78,6 +91,27 @@ public sealed interface Json {
                     yield new Other();
                 }
             };
+        }
+
+        private Json number() {
+            int start = index;
+            if (peek('-')) {
+                index++;
+            }
+            if (done() || !Character.isDigit(text.charAt(index))) {
+                throw new IllegalArgumentException("expected number");
+            }
+            while (!done() && Character.isDigit(text.charAt(index))) {
+                index++;
+            }
+            if (!done()) {
+                char ch = text.charAt(index);
+                if (ch == '.' || ch == 'e' || ch == 'E') {
+                    skipLiteral();
+                    return new Other();
+                }
+            }
+            return new Num(Long.parseLong(text.substring(start, index)));
         }
 
         private Json object() {
