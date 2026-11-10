@@ -267,7 +267,10 @@ public final class ContainerRuntime {
     }
 
     public static int delete(Path root, String id, boolean force) throws IOException {
-        Path state = requireContainer(root, id);
+        Path state = containerDir(root, id);
+        if (!Files.isDirectory(state)) {
+            return 0;
+        }
         String status = Files.readString(state.resolve("status")).trim();
         if (!force && "running".equals(status) && processAlive(state)) {
             throw new IllegalStateException("container is running: " + id);

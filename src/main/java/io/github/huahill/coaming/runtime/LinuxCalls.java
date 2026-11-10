@@ -76,6 +76,8 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
     private static final MethodHandle SECCOMP_RELEASE = seccomp("seccomp_release", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
+    private static final int RDONLY = 1;
+    private static final int MS_REMOUNT = 32;
     private static final int MS_REC = 16384;
     private static final int MS_PRIVATE = 1 << 18;
     private static final int MS_BIND = 4096;
@@ -105,17 +107,28 @@ final class LinuxCalls {
         if (Files.isSymbolicLink(target)) {
             throw new IllegalStateException("refusing to mask symlink " + path);
         }
-        ensureDevNull();
-        int rc = mount("/dev/null", path, null, MS_BIND, null);
-        if (rc == 0) {
+        if (Files.isDirectory(target)) {
+            check(mount("tmpfs", path, "tmpfs", RDONLY, "mode=000"), "mask " + path);
             return;
         }
-        int err = errno();
-        if (err == 20) {
-            check(mount("tmpfs", path, "tmpfs", 1, "mode=000"), "mask " + path);
-            return;
+        String source = Files.exists(Path.of("/dev/null")) ? "/dev/null" : emptyMask();
+        check(mount(source, path, null, MS_BIND, null), "mask " + path);
+        check(mount(source, path, null, MS_BIND | MS_REMOUNT | RDONLY, null), "mask readonly " + path);
+    }
+
+    private static String emptyMask() {
+        Path file = Path.of("/dev/.coaming-mask");
+        if (!Files.exists(file)) {
+            try {
+                if (file.getParent() != null) {
+                    Files.createDirectories(file.getParent());
+                }
+                Files.createFile(file);
+            } catch (java.io.IOException failure) {
+                throw new IllegalStateException("mask file failed", failure);
+            }
         }
-        throw new IllegalStateException("mask " + path + " failed: " + err);
+        return file.toString();
     }
 
     static void readonly(String path) {
@@ -241,9 +254,11 @@ final class LinuxCalls {
     static void kill(int pid, int signal) {
         try {
             int rc = (int) KILL.invokeExact(pid, signal);
-            if (rc != 0) {
+            if (rc != 0 && errno() != 3) {
                 throw new IllegalStateException("kill " + pid + " failed: " + errno());
             }
+        } catch (IllegalStateException failure) {
+            throw failure;
         } catch (Throwable failure) {
             throw new IllegalStateException("kill " + pid + " failed", failure);
         }
@@ -493,7 +508,7 @@ final class LinuxCalls {
                         throw new IllegalStateException("seccomp resolve failed", failure);
                     }
                     if (number < 0) {
-                        throw new IllegalArgumentException("unknown syscall " + name);
+                        continue;
                     }
                     int rc;
                     try {
