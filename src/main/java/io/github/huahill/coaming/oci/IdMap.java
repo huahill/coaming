@@ -45,4 +45,11 @@ public record IdMap(long containerID, long hostID, long size) {
         }
         return -1;
     }
+
+    public static int bits(long id) {
+        if (id < 0 || id > 0xFFFFFFFFL) {
+            throw new IllegalArgumentException("id mapping does not fit chown");
+        }
+        return (int) id;
+    }
 }

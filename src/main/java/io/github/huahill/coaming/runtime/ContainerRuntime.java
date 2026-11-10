@@ -13,6 +13,7 @@ import io.github.huahill.coaming.oci.Rlimit;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import io.github.huahill.coaming.oci.BindFds;
 import io.github.huahill.coaming.oci.IdMap;
 import io.github.huahill.coaming.oci.IdmapPlan;
 import java.nio.file.Files;
@@ -105,11 +106,18 @@ public final class ContainerRuntime {
         LinuxCalls.bindPrivate(rootfs.toString());
         boolean mountsProc = false;
         java.util.Map<String, Integer> idmaps = IdmapPlan.descriptors(System::getenv);
-        for (OciMount mount : config.mounts()) {
-            if ("/proc".equals(mount.destination())) {
-                mountsProc = true;
+        java.util.Map<String, Integer> binds = BindFds.descriptors(System::getenv);
+        try {
+            for (OciMount mount : config.mounts()) {
+                if ("/proc".equals(mount.destination())) {
+                    mountsProc = true;
+                }
+                mountOne(rootfs, mount, idmaps, binds);
             }
-            mountOne(rootfs, mount, idmaps);
+        } finally {
+            for (int descriptor : binds.values()) {
+                LinuxCalls.closeFd(descriptor);
+            }
         }
         Path oldRoot = rootfs.resolve("oldroot");
         Files.createDirectories(oldRoot);
@@ -166,6 +174,9 @@ public final class ContainerRuntime {
             return Path.of("/proc/self/exe").toRealPath().toString();
         }
         Path copy = state.resolve("coaming");
+        Path copyDirectory = ExecLocation.directory(state, Files.readString(Path.of("/proc/self/mountinfo")));
+        Files.createDirectories(copyDirectory);
+        copy = copyDirectory.resolve("coaming");
         Files.copy(Path.of("/proc/self/exe"), copy, StandardCopyOption.REPLACE_EXISTING);
         if (!copy.toFile().setExecutable(true, false)) {
             throw new IllegalStateException("runtime copy is not executable");
@@ -173,6 +184,13 @@ public final class ContainerRuntime {
         try (var paths = Files.walk(state)) {
             for (Path path : paths.toList()) {
                 LinuxCalls.chown(path.toString(), hostUid, hostGid);
+            }
+        }
+        if (!copyDirectory.equals(state)) {
+            try (var paths = Files.walk(copyDirectory)) {
+                for (Path path : paths.toList()) {
+                    LinuxCalls.chown(path.toString(), hostUid, hostGid);
+                }
             }
         }
         return copy.toString();
@@ -204,10 +222,13 @@ public final class ContainerRuntime {
         return false;
     }
 
-    private static void mountOne(Path rootfs, OciMount mount, java.util.Map<String, Integer> idmaps) throws IOException {
+    private static void mountOne(
+            Path rootfs, OciMount mount, java.util.Map<String, Integer> idmaps, java.util.Map<String, Integer> binds)
+            throws IOException {
         MountPlan.Prepared prepared = MountPlan.prepare(mount);
+        String source = BindFds.source(mount.destination(), prepared.source(), binds);
         Path dest = rootfs.resolve(mount.destination().substring(1));
-        boolean directory = prepared.fstype() != null || Files.isDirectory(Path.of(prepared.source()));
+        boolean directory = prepared.fstype() != null || Files.isDirectory(Path.of(source));
         if (directory) {
             Files.createDirectories(dest);
         } else if (!Files.exists(dest)) {
@@ -222,6 +243,11 @@ public final class ContainerRuntime {
                 throw new IllegalStateException("idmap mount was not prepared: " + mount.destination());
             }
             LinuxCalls.moveMount(descriptor, dest.toString());
+            return;
+        }
+        Integer preparedBind = binds.get(mount.destination());
+        if (preparedBind != null) {
+            LinuxCalls.moveMount(preparedBind, dest.toString());
             return;
         }
         LinuxCalls.mountPrepared(prepared.source(), dest.toString(), prepared.fstype(), prepared.flags(), prepared.remount(), prepared.propagation(), prepared.data());

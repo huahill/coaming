@@ -145,6 +145,12 @@ class OciConfigTest {
     }
 
     @Test
+    void acceptsTheHighHostIdKubernetesAssigns() {
+        assertEquals((int) 3918528512L, IdMap.bits(3918528512L));
+        assertThrows(IllegalArgumentException.class, () -> IdMap.bits(0x1_0000_0000L));
+    }
+
+    @Test
     void plansAnIdmappedBindWithoutPassingTheOptionToMount() {
         MountPlan.Prepared prepared = MountPlan.prepare(new OciMount(
                 "/data", "bind", "/host/data", List.of("bind", "ro", "idmap")));

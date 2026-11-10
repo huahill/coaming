@@ -1,3 +1,5 @@
+mod bind_mounts;
+
 /// Probe whether this process can enter a user namespace before any extra thread exists.
 ///
 /// `0` means this process had one thread and `unshare(CLONE_NEWUSER)` succeeded.
@@ -73,6 +75,7 @@ fn enter_container() {
     if std::env::var_os("COAMING_INIT_STAGE").is_some_and(|value| value == "jvm") {
         return;
     }
+    prepare_bind_fds();
     let Some(state) = argument_value("--state") else {
         unsafe { libc::_exit(74) };
     };
@@ -165,6 +168,111 @@ fn enter_container() {
 
 
 #[cfg(target_os = "linux")]
+fn prepare_bind_fds() {
+    let Some(bundle) = argument_value("--bundle") else {
+        unsafe { libc::_exit(74) };
+    };
+    let path = format!("{bundle}/config.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            complain(&format!("failed to read {path}: {error}"));
+            unsafe { libc::_exit(92) };
+        }
+    };
+    let mounts = bind_mounts::bind_mounts(&text);
+    set_env("COAMING_BIND_COUNT", &mounts.len().to_string());
+    for (index, mount) in mounts.iter().enumerate() {
+        let opened = detach_bind(mount);
+        let kept = park_fd(opened, 200 + index as i32);
+        set_env(&format!("COAMING_BIND_FD_{index}"), &kept.to_string());
+        set_env(&format!("COAMING_BIND_DST_{index}"), &mount.destination);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
+    let Ok(source) = std::ffi::CString::new(mount.source.clone()) else {
+        complain("bind mount source contains NUL");
+        unsafe { libc::_exit(92) };
+    };
+    // OPEN_TREE_CLONE is 1. A detached copy can be attached after setuid.
+    let mut flags = 1 | libc::O_CLOEXEC;
+    if mount.recursive {
+        flags |= libc::AT_RECURSIVE;
+    }
+    let mounted = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) } as i32;
+    if mounted < 0 {
+        complain(&format!(
+            "failed to open bind mount {}: {}",
+            mount.source,
+            std::io::Error::last_os_error()
+        ));
+        unsafe { libc::_exit(92) };
+    }
+    // mount_setattr rejects MS_REC in the propagation field. Recursion is AT_RECURSIVE.
+    let mut setattr_flags = libc::AT_EMPTY_PATH;
+    let propagation = mount.propagation & !16384;
+    if mount.recursive {
+        setattr_flags |= libc::AT_RECURSIVE;
+    }
+    let attr = MountAttr {
+        attr_set: mount.attr_set,
+        attr_clr: 0,
+        propagation,
+        userns_fd: 0,
+    };
+    let empty = std::ffi::CString::new("").unwrap();
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            mounted,
+            empty.as_ptr(),
+            setattr_flags,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if rc != 0 {
+        complain(&format!(
+            "failed to prepare bind mount {}: {}",
+            mount.source,
+            std::io::Error::last_os_error()
+        ));
+        unsafe {
+            libc::close(mounted);
+            libc::_exit(92);
+        }
+    }
+    mounted
+}
+
+#[cfg(target_os = "linux")]
+fn park_fd(fd: i32, preferred: i32) -> i32 {
+    unsafe {
+        let mut target = preferred;
+        loop {
+            if libc::fcntl(target, libc::F_GETFD) == -1 {
+                break;
+            }
+            target += 1;
+            if target > 1023 {
+                complain("no free descriptor for a bind mount");
+                libc::_exit(92);
+            }
+        }
+        if libc::dup2(fd, target) < 0 {
+            complain("failed to preserve a bind mount descriptor");
+            libc::_exit(92);
+        }
+        if fd != target {
+            libc::close(fd);
+        }
+        target
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, String)>, uid_map: &str, gid_map: &str) {
     let create = unshare.iter().any(|kind| kind == "user");
     let join = joins.iter().find(|(kind, _)| kind == "user").map(|(_, path)| path.clone());
@@ -186,6 +294,12 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
                 libc::_exit(88);
             }
             libc::close(fd);
+            // Host uid 0 is outside the joined map, so it shows up as overflow.
+            // Container uid 0 is mapped and can finish the remaining setup.
+            if libc::setresgid(0, 0, 0) != 0 || libc::setresuid(0, 0, 0) != 0 {
+                complain("failed to become container root after joining the user namespace");
+                libc::_exit(77);
+            }
         }
         return;
     }

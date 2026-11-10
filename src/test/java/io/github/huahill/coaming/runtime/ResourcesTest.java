@@ -32,6 +32,20 @@ class ResourcesTest {
         assertEquals(1000, Cgroups.euid("Name:\tdemo\nUid:\t1000\t1000\t1000\t1000\n"));
     }
 
+    @Test
+    void keepsTheRuntimeOffANoexecMount() {
+        String mountinfo = """
+                25 1 0:21 / /run rw,nosuid,nodev,noexec shared:1 - tmpfs tmpfs rw
+                40 1 8:1 / /var rw,relatime - ext4 /dev/sda1 rw
+                """;
+
+        assertTrue(ExecLocation.noexec(mountinfo, "/run/containerd/runc/k8s.io/demo"));
+        assertEquals(Path.of("/var/lib/coaming/exec/demo"),
+                ExecLocation.directory(Path.of("/run/containerd/runc/k8s.io/demo"), mountinfo));
+        assertEquals(Path.of("/var/lib/coaming/state"),
+                ExecLocation.directory(Path.of("/var/lib/coaming/state"), mountinfo));
+    }
+
 
     @Test
     void resolvesAProgramFromPath(@TempDir Path bin) throws Exception {

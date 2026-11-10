@@ -276,11 +276,10 @@ final class LinuxCalls {
     }
 
     static void chown(String path, long uid, long gid) {
-        if (uid < 0 || gid < 0 || uid > Integer.MAX_VALUE || gid > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("id mapping does not fit chown");
-        }
+        int user = io.github.huahill.coaming.oci.IdMap.bits(uid);
+        int group = io.github.huahill.coaming.oci.IdMap.bits(gid);
         try (Arena arena = Arena.ofConfined()) {
-            int rc = (int) CHOWN.invokeExact(arena.allocateFrom(path), (int) uid, (int) gid);
+            int rc = (int) CHOWN.invokeExact(arena.allocateFrom(path), user, group);
             if (rc != 0) {
                 throw new IllegalStateException("chown " + path + " failed: " + errno());
             }
@@ -621,6 +620,10 @@ final class LinuxCalls {
         } catch (Throwable failure) {
             throw new IllegalStateException("open " + path + " failed", failure);
         }
+    }
+
+    static void closeFd(int fd) {
+        close(fd);
     }
 
     private static void close(int fd) {
