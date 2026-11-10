@@ -6,6 +6,7 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
+import io.github.huahill.coaming.oci.LinuxCapabilities;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,6 +42,11 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
     private static final MethodHandle KILL = downcall("kill", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle PRCTL = downcall("prctl", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG));
+    private static final MethodHandle CAPSET = downcall("capset", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
     private static final MethodHandle ERRNO_LOCATION = downcall("__errno_location", FunctionDescriptor.of(
             ValueLayout.ADDRESS));
     private static final MethodHandle MEMFD_CREATE = downcall("memfd_create", FunctionDescriptor.of(
@@ -70,6 +76,7 @@ final class LinuxCalls {
     private LinuxCalls() {}
 
     static void bindPrivate(String path) {
+        check(mount(null, "/", null, MS_REC | MS_PRIVATE, null), "make / private");
         check(mount(path, path, null, MS_BIND, null), "bind " + path);
         check(mount(null, path, null, MS_REC | MS_PRIVATE, null), "make private " + path);
     }
@@ -228,6 +235,62 @@ final class LinuxCalls {
             }
         } catch (Throwable failure) {
             throw new IllegalStateException("kill " + pid + " failed", failure);
+        }
+    }
+
+    static void applyCapabilities(LinuxCapabilities caps) {
+        check(prctl(47, 4, 0, 0, 0), "clear ambient capabilities");
+        for (int cap = 0; cap < 64; cap++) {
+            boolean want = ((caps.bounding() >>> cap) & 1L) == 1L;
+            int has = prctl(23, cap, 0, 0, 0);
+            if (has < 0) {
+                if (want) {
+                    throw new IllegalStateException("capability is not supported: " + cap);
+                }
+                continue;
+            }
+            if (has == 0 && want) {
+                throw new IllegalStateException("capability is not in the bounding set: " + cap);
+            }
+            if (has == 1 && !want) {
+                check(prctl(24, cap, 0, 0, 0), "drop bounding capability " + cap);
+            }
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment header = arena.allocate(8);
+            header.set(ValueLayout.JAVA_INT, 0, 0x20080522);
+            header.set(ValueLayout.JAVA_INT, 4, 0);
+            MemorySegment data = arena.allocate(24);
+            writeCap(data, 0, caps.effective(), caps.permitted(), caps.inheritable());
+            writeCap(data, 12, caps.effective() >>> 32, caps.permitted() >>> 32, caps.inheritable() >>> 32);
+            check((int) CAPSET.invokeExact(header, data), "capset");
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("capset failed", failure);
+        }
+        for (int cap = 0; cap < 64; cap++) {
+            if (((caps.ambient() >>> cap) & 1L) == 1L) {
+                check(prctl(47, 2, cap, 0, 0), "raise ambient capability " + cap);
+            }
+        }
+    }
+
+    static void noNewPrivileges() {
+        check(prctl(38, 1, 0, 0, 0), "no new privileges");
+    }
+
+    private static void writeCap(MemorySegment data, int offset, long effective, long permitted, long inheritable) {
+        data.set(ValueLayout.JAVA_INT, offset, (int) effective);
+        data.set(ValueLayout.JAVA_INT, offset + 4, (int) permitted);
+        data.set(ValueLayout.JAVA_INT, offset + 8, (int) inheritable);
+    }
+
+    private static int prctl(int option, long arg2, long arg3, long arg4, long arg5) {
+        try {
+            return (int) PRCTL.invokeExact(option, arg2, arg3, arg4, arg5);
+        } catch (Throwable failure) {
+            throw new IllegalStateException("prctl failed", failure);
         }
     }
 

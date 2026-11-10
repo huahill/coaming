@@ -121,6 +121,12 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container has no process args");
         }
         args[0] = resolveProgram(args[0], config.env());
+        if (config.capabilities() != null) {
+            LinuxCalls.applyCapabilities(config.capabilities());
+        }
+        if (config.noNewPrivileges()) {
+            LinuxCalls.noNewPrivileges();
+        }
         if (config.seccomp() != null) {
             LinuxCalls.installSeccomp(config.seccomp());
         }
@@ -166,6 +172,13 @@ public final class ContainerRuntime {
         }
         if (detach) {
             command.add("--detach");
+        }
+        if (spec.capabilities() != null) {
+            command.add("--caps");
+            command.add(spec.capabilities().encoded());
+        }
+        if (spec.noNewPrivileges()) {
+            command.add("--no-new-privs");
         }
         command.add("--");
         command.addAll(spec.args());

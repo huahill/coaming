@@ -3,7 +3,7 @@ package io.github.huahill.coaming.oci;
 import io.github.huahill.coaming.json.Json;
 import java.util.List;
 
-public record OciProcess(List<String> args, String cwd, List<String> env) {
+public record OciProcess(List<String> args, String cwd, List<String> env, LinuxCapabilities capabilities, boolean noNewPrivileges) {
     public static OciProcess parse(String text) {
         Json root = Json.parse(text);
         String cwd = "/";
@@ -16,6 +16,11 @@ public record OciProcess(List<String> args, String cwd, List<String> env) {
         if (envValue != null) {
             env = envValue.strings();
         }
-        return new OciProcess(root.field("args").strings(), cwd, env);
+        return new OciProcess(
+                root.field("args").strings(),
+                cwd,
+                env,
+                LinuxCapabilities.from(root.optional("capabilities")),
+                root.optional("noNewPrivileges") != null && root.optional("noNewPrivileges").booleanValue());
     }
 }

@@ -267,6 +267,8 @@ fn enter_exec() {
     let mut cwd = "/".to_string();
     let mut envs = Vec::new();
     let mut detach = false;
+    let mut caps = None;
+    let mut no_new_privs = false;
     let mut user = Vec::new();
     let mut index = 2usize;
     while index < parts.len() {
@@ -291,6 +293,14 @@ fn enter_exec() {
             }
             "--detach" => {
                 detach = true;
+                index += 1;
+            }
+            "--caps" => {
+                caps = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--no-new-privs" => {
+                no_new_privs = true;
                 index += 1;
             }
             "--" => {
@@ -365,6 +375,12 @@ fn enter_exec() {
             unsafe { libc::_exit(87) };
         }
     }
+    if let Some(spec) = caps {
+        apply_capabilities(&spec);
+    }
+    if no_new_privs && unsafe { libc::prctl(38, 1, 0, 0, 0) } != 0 {
+        unsafe { libc::_exit(91) };
+    }
     if let Some(program) = user.first().cloned() {
         user[0] = resolve_program(&program, &envs);
     }
@@ -386,6 +402,56 @@ fn enter_exec() {
     }
 }
 
+
+#[cfg(target_os = "linux")]
+fn apply_capabilities(spec: &str) {
+    let parts: Vec<u64> = spec
+        .split(',')
+        .map(|part| u64::from_str_radix(part, 16).unwrap_or_else(|_| unsafe { libc::_exit(90) }))
+        .collect();
+    if parts.len() != 5 {
+        unsafe { libc::_exit(90) };
+    }
+    let (permitted, inheritable, effective, bounding, ambient) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+    unsafe {
+        if libc::prctl(47, 4, 0, 0, 0) != 0 {
+            libc::_exit(90);
+        }
+        for cap in 0..64 {
+            let want = ((bounding >> cap) & 1) == 1;
+            let has = libc::prctl(23, cap, 0, 0, 0);
+            if has < 0 {
+                if want {
+                    libc::_exit(90);
+                }
+                continue;
+            }
+            if has == 0 && want {
+                libc::_exit(90);
+            }
+            if has == 1 && !want && libc::prctl(24, cap, 0, 0, 0) != 0 {
+                libc::_exit(90);
+            }
+        }
+        let header = [0x20080522u32, 0u32];
+        let data = [
+            effective as u32,
+            permitted as u32,
+            inheritable as u32,
+            (effective >> 32) as u32,
+            (permitted >> 32) as u32,
+            (inheritable >> 32) as u32,
+        ];
+        if libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr()) != 0 {
+            libc::_exit(90);
+        }
+        for cap in 0..64 {
+            if ((ambient >> cap) & 1) == 1 && libc::prctl(47, 2, cap, 0, 0) != 0 {
+                libc::_exit(90);
+            }
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn resolve_program(program: &str, env: &[String]) -> String {
