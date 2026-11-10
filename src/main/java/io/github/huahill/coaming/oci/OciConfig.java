@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -79,7 +79,41 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
                 readonlyPaths = readonly.strings();
             }
         }
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths);
+        List<DeviceNode> devices = new ArrayList<>();
+        List<DeviceRule> deviceRules = new ArrayList<>();
+        SeccompProfile seccomp = null;
+        if (linux != null) {
+            Json deviceValues = linux.optional("devices");
+            if (deviceValues instanceof Json.Arr arr) {
+                for (Json item : arr.items()) {
+                    int mode = 438;
+                    Json modeValue = item.optional("fileMode");
+                    if (modeValue != null) {
+                        mode = (int) modeValue.longValue();
+                    }
+                    devices.add(new DeviceNode(item.field("path").string(), item.field("type").string(), item.field("major").longValue(), item.field("minor").longValue(), mode, optionalInt(item, "uid"), optionalInt(item, "gid")));
+                }
+            }
+            Json resources = linux.optional("resources");
+            if (resources != null && resources.optional("devices") instanceof Json.Arr rules) {
+                for (Json item : rules.items()) {
+                    boolean allow = item.optional("allow") != null && item.optional("allow").booleanValue();
+                    String deviceType = item.optional("type") == null ? "a" : item.optional("type").string();
+                    String access = item.optional("access") == null ? "rwm" : item.optional("access").string();
+                    boolean all = "a".equals(deviceType) && item.optional("major") == null && item.optional("minor") == null;
+                    deviceRules.add(new DeviceRule(allow, deviceType, access, all));
+                }
+            }
+            if (linux.optional("seccomp") != null) {
+                seccomp = SeccompProfile.parse(linux.optional("seccomp"));
+            }
+        }
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp);
+    }
+
+    private static int optionalInt(Json item, String name) {
+        Json value = item.optional(name);
+        return value == null ? 0 : (int) value.longValue();
     }
 
     public Path root(Path bundle) {

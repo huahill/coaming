@@ -158,6 +158,47 @@ class OciConfigTest {
         assertEquals(List.of("/proc/sys", "/proc/sysrq-trigger"), OciConfig.read(bundle).readonlyPaths());
     }
 
+
+    @Test
+    void readsADeviceAndAllowsOnlyAnUnrestrictedPolicy() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "linux": {
+                    "devices": [{"path": "/dev/zero", "type": "c", "major": 1, "minor": 5, "fileMode": 438}],
+                    "resources": {"devices": [{"allow": true, "type": "a", "access": "rwm"}]}
+                  }
+                }
+                """);
+        OciConfig config = OciConfig.read(bundle);
+        assertEquals("/dev/zero", config.devices().getFirst().path());
+        DevicePolicy.requireEnforceable(config.deviceRules());
+    }
+
+    @Test
+    void rejectsANarrowDevicePolicy() {
+        assertThrows(IllegalArgumentException.class, () -> DevicePolicy.requireEnforceable(List.of(
+                new DeviceRule(false, "a", "rwm", true))));
+    }
+
+    @Test
+    void encodesASeccompErrnoRule() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "linux": {"seccomp": {
+                    "defaultAction": "SCMP_ACT_ALLOW",
+                    "syscalls": [{"names": ["getcwd"], "action": "SCMP_ACT_ERRNO", "errnoRet": 13}]
+                  }}
+                }
+                """);
+        SeccompProfile profile = OciConfig.read(bundle).seccomp();
+        assertEquals(0x7fff0000, profile.defaultAction());
+        assertEquals(0x00050000 | 13, profile.syscalls().getFirst().action());
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

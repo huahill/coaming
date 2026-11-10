@@ -1,6 +1,8 @@
 package io.github.huahill.coaming.runtime;
 
 import io.github.huahill.coaming.json.Json;
+import io.github.huahill.coaming.oci.DeviceNode;
+import io.github.huahill.coaming.oci.DevicePolicy;
 import io.github.huahill.coaming.oci.MountPlan;
 import io.github.huahill.coaming.oci.NamespacePlan;
 import io.github.huahill.coaming.oci.OciMount;
@@ -26,6 +28,7 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container already exists: " + id);
         }
         OciConfig config = OciConfig.read(bundle);
+        DevicePolicy.requireEnforceable(config.deviceRules());
         Files.createDirectories(state);
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
@@ -83,6 +86,9 @@ public final class ContainerRuntime {
         if (!mountsProc) {
             LinuxCalls.mountProc("/proc");
         }
+        for (DeviceNode device : config.devices()) {
+            LinuxCalls.createDevice(device.path(), device.type(), device.major(), device.minor(), device.fileMode());
+        }
         for (String masked : config.maskedPaths()) {
             LinuxCalls.mask(masked);
         }
@@ -98,6 +104,9 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container has no process args");
         }
         args[0] = resolveProgram(args[0], config.env());
+        if (config.seccomp() != null) {
+            LinuxCalls.installSeccomp(config.seccomp());
+        }
         LinuxCalls.exec(args, config.env().toArray(String[]::new));
         return 1;
     }

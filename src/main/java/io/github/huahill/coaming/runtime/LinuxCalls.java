@@ -13,6 +13,7 @@ import java.nio.file.Path;
 final class LinuxCalls {
     private static final Linker LINKER = Linker.nativeLinker();
     private static final SymbolLookup LIBC = LINKER.defaultLookup();
+    private static final SymbolLookup SECCOMP = openSeccomp();
     private static final MethodHandle MOUNT = downcall("mount", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
             ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
@@ -46,6 +47,17 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle MKNOD = downcall("mknod", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
+    private static final MethodHandle SECCOMP_INIT = seccomp("seccomp_init", FunctionDescriptor.of(
+            ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+    private static final MethodHandle SECCOMP_RESOLVE = seccomp("seccomp_syscall_resolve_name", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+    private static final MethodHandle SECCOMP_RULE = seccomp("seccomp_rule_add_array", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+    private static final MethodHandle SECCOMP_ATTR = seccomp("seccomp_attr_set", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle SECCOMP_LOAD = seccomp("seccomp_load", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+    private static final MethodHandle SECCOMP_RELEASE = seccomp("seccomp_release", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
     private static final int MS_REC = 16384;
     private static final int MS_PRIVATE = 1 << 18;
@@ -286,6 +298,103 @@ final class LinuxCalls {
         }
     }
 
+
+    static void createDevice(String path, String type, long major, long minor, int fileMode) {
+        int kind = switch (type) {
+            case "c", "u" -> 8192;
+            case "b" -> 24576;
+            case "p" -> 4096;
+            default -> throw new IllegalArgumentException("unsupported device type " + type);
+        };
+        Path file = Path.of(path);
+        if (file.getParent() != null) {
+            try {
+                Files.createDirectories(file.getParent());
+            } catch (java.io.IOException failure) {
+                throw new IllegalStateException("mkdir " + file.getParent() + " failed", failure);
+            }
+        }
+        if (Files.exists(file)) {
+            return;
+        }
+        long dev = ((major & 0xfff) << 8) | ((major & 0xfffff000L) << 32) | (minor & 0xff) | ((minor & 0xffffff00L) << 12);
+        try (Arena arena = Arena.ofConfined()) {
+            int rc = (int) MKNOD.invokeExact(arena.allocateFrom(path), kind | (fileMode & 07777), dev);
+            if (rc != 0 && errno() != 17) {
+                throw new IllegalStateException("mknod " + path + " failed: " + errno());
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("mknod " + path + " failed", failure);
+        }
+    }
+
+    static void installSeccomp(io.github.huahill.coaming.oci.SeccompProfile profile) {
+        MemorySegment context;
+        try {
+            context = (MemorySegment) SECCOMP_INIT.invokeExact(profile.defaultAction());
+        } catch (Throwable failure) {
+            throw new IllegalStateException("seccomp_init failed", failure);
+        }
+        if (context == null || context.address() == 0) {
+            throw new IllegalStateException("seccomp_init failed");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            for (var syscall : profile.syscalls()) {
+                MemorySegment arguments = MemorySegment.NULL;
+                if (!syscall.args().isEmpty()) {
+                    arguments = arena.allocate(24L * syscall.args().size());
+                    int offset = 0;
+                    for (var argument : syscall.args()) {
+                        arguments.set(ValueLayout.JAVA_INT, offset, argument.index());
+                        arguments.set(ValueLayout.JAVA_INT, offset + 4, argument.operation());
+                        arguments.set(ValueLayout.JAVA_LONG, offset + 8, argument.value());
+                        arguments.set(ValueLayout.JAVA_LONG, offset + 16, argument.valueTwo());
+                        offset += 24;
+                    }
+                }
+                for (String name : syscall.names()) {
+                    int number;
+                    try {
+                        number = (int) SECCOMP_RESOLVE.invokeExact(arena.allocateFrom(name));
+                    } catch (Throwable failure) {
+                        throw new IllegalStateException("seccomp resolve failed", failure);
+                    }
+                    if (number < 0) {
+                        throw new IllegalArgumentException("unknown syscall " + name);
+                    }
+                    int rc;
+                    try {
+                        rc = (int) SECCOMP_RULE.invokeExact(context, syscall.action(), number, syscall.args().size(), arguments);
+                    } catch (Throwable failure) {
+                        throw new IllegalStateException("seccomp rule failed", failure);
+                    }
+                    if (rc != 0) {
+                        throw new IllegalStateException("seccomp rule " + name + " failed: " + rc);
+                    }
+                }
+            }
+            int attr;
+            int loaded;
+            try {
+                attr = (int) SECCOMP_ATTR.invokeExact(context, 4, 1);
+                loaded = (int) SECCOMP_LOAD.invokeExact(context);
+            } catch (Throwable failure) {
+                throw new IllegalStateException("seccomp load failed", failure);
+            }
+            if (attr != 0 || loaded != 0) {
+                throw new IllegalStateException("seccomp load failed: " + attr + "/" + loaded);
+            }
+        } finally {
+            try {
+                SECCOMP_RELEASE.invokeExact(context);
+            } catch (Throwable ignored) {
+                // The load error is the one that matters.
+            }
+        }
+    }
+
     private static void ensureDevNull() {
         if (Files.exists(Path.of("/dev/null"))) {
             return;
@@ -365,5 +474,26 @@ final class LinuxCalls {
 
     private static MethodHandle downcall(String symbol, FunctionDescriptor descriptor) {
         return LINKER.downcallHandle(LIBC.find(symbol).orElseThrow(() -> new IllegalStateException("libc " + symbol)), descriptor);
+    }
+
+    private static MethodHandle seccomp(String symbol, FunctionDescriptor descriptor) {
+        return LINKER.downcallHandle(SECCOMP.find(symbol).orElseThrow(() -> new IllegalStateException("libseccomp " + symbol)), descriptor);
+    }
+
+    private static SymbolLookup openSeccomp() {
+        String[] candidates = {
+            "/usr/lib/aarch64-linux-gnu/libseccomp.so.2",
+            "/lib/aarch64-linux-gnu/libseccomp.so.2",
+            "/usr/lib/x86_64-linux-gnu/libseccomp.so.2",
+            "/lib/x86_64-linux-gnu/libseccomp.so.2",
+            "/usr/lib64/libseccomp.so.2",
+            "/lib64/libseccomp.so.2"
+        };
+        for (String candidate : candidates) {
+            if (Files.exists(Path.of(candidate))) {
+                return SymbolLookup.libraryLookup(Path.of(candidate), Arena.global());
+            }
+        }
+        throw new IllegalStateException("libseccomp is not installed");
     }
 }

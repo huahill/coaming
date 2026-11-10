@@ -113,6 +113,7 @@
                 <buildArg>-H:NativeLinkerOption=-Wl,--whole-archive</buildArg>
                 <buildArg>-H:NativeLinkerOption=${nsexec.lib}</buildArg>
                 <buildArg>-H:NativeLinkerOption=-Wl,--no-whole-archive</buildArg>
+                <buildArg>-H:NativeLinkerOption=-lseccomp</buildArg>
               </buildArgs>
             </configuration>
           </plugin>

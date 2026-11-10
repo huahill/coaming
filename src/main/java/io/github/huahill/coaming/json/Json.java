@@ -37,6 +37,13 @@ public sealed interface Json {
         throw new IllegalArgumentException("expected string");
     }
 
+    default boolean booleanValue() {
+        if (this instanceof Bool bool) {
+            return bool.value;
+        }
+        throw new IllegalArgumentException("expected boolean");
+    }
+
     default long longValue() {
         if (this instanceof Num number) {
             return number.value;
@@ -63,6 +70,8 @@ public sealed interface Json {
 
     record Num(long value) implements Json {}
 
+    record Bool(boolean value) implements Json {}
+
     record Other() implements Json {}
 
     final class Parser {
@@ -86,11 +95,21 @@ public sealed interface Json {
                 case '{' -> object();
                 case '[' -> array();
                 case '"' -> new Str(stringLiteral());
+                case 't' -> word("true", new Bool(true));
+                case 'f' -> word("false", new Bool(false));
                 default -> {
                     skipLiteral();
                     yield new Other();
                 }
             };
+        }
+
+        private Json word(String expected, Json value) {
+            if (!text.startsWith(expected, index)) {
+                throw new IllegalArgumentException("expected " + expected);
+            }
+            index += expected.length();
+            return value;
         }
 
         private Json number() {
