@@ -130,6 +130,24 @@ class OciConfigTest {
                 () -> MountPlan.prepare(new OciMount("/data", "bind", "/host/data", List.of("nosymfollow"))));
     }
 
+    @Test
+    void acceptsTheMountsAKubernetesPodUses() {
+        MountPlan.Prepared dev = MountPlan.prepare(new OciMount(
+                "/dev", "tmpfs", "tmpfs", List.of("nosuid", "strictatime", "mode=755", "size=65536k")));
+        MountPlan.Prepared pts = MountPlan.prepare(new OciMount(
+                "/dev/pts", "devpts", "devpts", List.of("nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5")));
+        MountPlan.Prepared cgroup = MountPlan.prepare(new OciMount(
+                "/sys/fs/cgroup", "cgroup", "cgroup", List.of("ro", "nosuid", "noexec", "nodev", "relatime")));
+
+        assertEquals(MountPlan.NOSUID | MountPlan.STRICTATIME, dev.flags());
+        assertEquals("mode=755,size=65536k", dev.data());
+        assertEquals(MountPlan.NOSUID | MountPlan.NOEXEC, pts.flags());
+        assertEquals("newinstance,ptmxmode=0666,mode=0620,gid=5", pts.data());
+        assertEquals("cgroup2", cgroup.fstype());
+        assertEquals("cgroup2", cgroup.source());
+        assertEquals(MountPlan.RDONLY | MountPlan.NOSUID | MountPlan.NOEXEC | MountPlan.NODEV | MountPlan.RELATIME, cgroup.flags());
+    }
+
 
     @Test
     void readsMaskedPaths() throws Exception {

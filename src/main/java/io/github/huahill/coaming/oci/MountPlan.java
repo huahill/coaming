@@ -9,12 +9,17 @@ public final class MountPlan {
     public static final long NODEV = 4;
     public static final long NOEXEC = 8;
     public static final long REMOUNT = 32;
+    public static final long NOATIME = 1024;
+    public static final long NODIRATIME = 2048;
     public static final long BIND = 4096;
     public static final long REC = 16384;
     public static final long UNBINDABLE = 1L << 17;
     public static final long PRIVATE = 1L << 18;
     public static final long SLAVE = 1L << 19;
     public static final long SHARED = 1L << 20;
+    public static final long RELATIME = 1L << 21;
+    public static final long STRICTATIME = 1L << 24;
+    public static final long LAZYTIME = 1L << 25;
 
     private MountPlan() {}
 
@@ -41,9 +46,17 @@ public final class MountPlan {
                 }
                 case "ro" -> readOnly = true;
                 case "rw" -> readOnly = false;
+                case "defaults" -> {
+                }
                 case "nosuid" -> flags |= NOSUID;
                 case "nodev" -> flags |= NODEV;
                 case "noexec" -> flags |= NOEXEC;
+                case "noatime" -> flags |= NOATIME;
+                case "nodiratime" -> flags |= NODIRATIME;
+                case "relatime" -> flags |= RELATIME;
+                case "strictatime" -> flags |= STRICTATIME;
+                case "lazytime" -> flags |= LAZYTIME;
+                case "newinstance" -> data.add(option);
                 case "private" -> {
                     propagation = PRIVATE;
                     sawPropagation = true;
@@ -103,6 +116,12 @@ public final class MountPlan {
             }
         }
         String source = mount.source() == null ? "" : mount.source();
+        if ("cgroup".equals(type) || "cgroup2".equals(type)) {
+            if (bind) {
+                throw new IllegalArgumentException("cgroup mount cannot be a bind");
+            }
+            return new Prepared("cgroup2", "cgroup2", flags, remount, propagation, String.join(",", data));
+        }
         if (bind && !source.startsWith("/")) {
             throw new IllegalArgumentException("bind source must be absolute");
         }

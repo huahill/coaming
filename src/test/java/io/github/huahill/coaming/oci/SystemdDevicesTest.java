@@ -15,7 +15,7 @@ class SystemdDevicesTest {
                 new DeviceRule(true, "c", "mwr", false, 1, 3)));
 
         assertEquals("strict", program.policy());
-        assertEquals(List.of(new SystemdDevices.Allow("char-1:3", "rwm")), program.allows());
+        assertEquals(List.of(new SystemdDevices.Allow("/dev/char/1:3", "rwm")), program.allows());
     }
 
     @Test
@@ -35,16 +35,23 @@ class SystemdDevicesTest {
                 new DeviceRule(false, "c", "rwm", false, 10, 229)));
 
         assertEquals("strict", program.policy());
-        assertEquals(List.of(new SystemdDevices.Allow("char-1:8", "rw")), program.allows());
+        assertEquals(List.of(new SystemdDevices.Allow("/dev/char/1:8", "rw")), program.allows());
     }
 
     @Test
-    void aWildcardMinorBecomesASystemdPattern() {
+    void aWildcardMinorBecomesThePtsGroup() {
         SystemdDevices.Program program = SystemdDevices.translate(List.of(
                 new DeviceRule(false, "a", "rwm", true, null, null),
-                new DeviceRule(true, "c", "rwm", false, 136, null)));
+                new DeviceRule(true, "c", "rwm", false, 136, null)), 136);
 
-        assertEquals(List.of(new SystemdDevices.Allow("char-136:*", "rwm")), program.allows());
+        assertEquals(List.of(new SystemdDevices.Allow("char-pts", "rwm")), program.allows());
+    }
+
+    @Test
+    void anotherWildcardMinorCannotBeExpressed() {
+        assertThrows(IllegalArgumentException.class, () -> SystemdDevices.translate(List.of(
+                new DeviceRule(false, "a", "rwm", true, null, null),
+                new DeviceRule(true, "c", "rwm", false, 10, null)), 136));
     }
 
     @Test
