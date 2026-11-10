@@ -269,6 +269,9 @@ fn enter_exec() {
     let mut detach = false;
     let mut caps = None;
     let mut no_new_privs = false;
+    let mut identity = None;
+    let mut rlimits = None;
+    let mut oom = None;
     let mut user = Vec::new();
     let mut index = 2usize;
     while index < parts.len() {
@@ -302,6 +305,18 @@ fn enter_exec() {
             "--no-new-privs" => {
                 no_new_privs = true;
                 index += 1;
+            }
+            "--user" => {
+                identity = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--rlimits" => {
+                rlimits = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--oom" => {
+                oom = parts.get(index + 1).cloned();
+                index += 2;
             }
             "--" => {
                 user.extend(parts[index + 1..].iter().cloned());
@@ -375,8 +390,12 @@ fn enter_exec() {
             unsafe { libc::_exit(87) };
         }
     }
-    if let Some(spec) = caps {
-        apply_capabilities(&spec);
+    if let Some(spec) = caps.as_deref() {
+        drop_bounding(spec);
+    }
+    apply_identity(oom.as_deref(), rlimits.as_deref(), identity.as_deref(), caps.is_some());
+    if let Some(spec) = caps.as_deref() {
+        commit_capabilities(spec);
     }
     if no_new_privs && unsafe { libc::prctl(38, 1, 0, 0, 0) } != 0 {
         unsafe { libc::_exit(91) };
@@ -404,15 +423,8 @@ fn enter_exec() {
 
 
 #[cfg(target_os = "linux")]
-fn apply_capabilities(spec: &str) {
-    let parts: Vec<u64> = spec
-        .split(',')
-        .map(|part| u64::from_str_radix(part, 16).unwrap_or_else(|_| unsafe { libc::_exit(90) }))
-        .collect();
-    if parts.len() != 5 {
-        unsafe { libc::_exit(90) };
-    }
-    let (permitted, inheritable, effective, bounding, ambient) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+fn drop_bounding(spec: &str) {
+    let (_, _, _, bounding, _) = capability_sets(spec);
     unsafe {
         if libc::prctl(47, 4, 0, 0, 0) != 0 {
             libc::_exit(90);
@@ -426,13 +438,17 @@ fn apply_capabilities(spec: &str) {
                 }
                 continue;
             }
-            if has == 0 && want {
-                libc::_exit(90);
-            }
-            if has == 1 && !want && libc::prctl(24, cap, 0, 0, 0) != 0 {
+            if has == 0 && want || (has == 1 && !want && libc::prctl(24, cap, 0, 0, 0) != 0) {
                 libc::_exit(90);
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn commit_capabilities(spec: &str) {
+    let (permitted, inheritable, effective, _, ambient) = capability_sets(spec);
+    unsafe {
         let header = [0x20080522u32, 0u32];
         let data = [
             effective as u32,
@@ -449,6 +465,68 @@ fn apply_capabilities(spec: &str) {
             if ((ambient >> cap) & 1) == 1 && libc::prctl(47, 2, cap, 0, 0) != 0 {
                 libc::_exit(90);
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capability_sets(spec: &str) -> (u64, u64, u64, u64, u64) {
+    let parts: Vec<u64> = spec
+        .split(',')
+        .map(|part| u64::from_str_radix(part, 16).unwrap_or_else(|_| unsafe { libc::_exit(90) }))
+        .collect();
+    if parts.len() != 5 {
+        unsafe { libc::_exit(90) };
+    }
+    (parts[0], parts[1], parts[2], parts[3], parts[4])
+}
+
+#[cfg(target_os = "linux")]
+fn apply_identity(oom: Option<&str>, rlimits: Option<&str>, identity: Option<&str>, keep_capabilities: bool) {
+    if let Some(score) = oom {
+        if std::fs::write("/proc/self/oom_score_adj", score).is_err() {
+            unsafe { libc::_exit(92) };
+        }
+    }
+    if let Some(spec) = rlimits {
+        for item in spec.split(',').filter(|item| !item.is_empty()) {
+            let Some((resource, bounds)) = item.split_once('=') else {
+                unsafe { libc::_exit(93) };
+            };
+            let Some((soft, hard)) = bounds.split_once(':') else {
+                unsafe { libc::_exit(93) };
+            };
+            let resource: u32 = resource.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
+            let soft: u64 = soft.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
+            let hard: u64 = hard.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
+            let value = [soft, hard];
+            if unsafe { libc::setrlimit(resource, value.as_ptr().cast()) } != 0 {
+                unsafe { libc::_exit(93) };
+            }
+        }
+    }
+    let Some(identity) = identity else {
+        return;
+    };
+    let mut fields = identity.split(':');
+    let uid: u32 = fields.next().unwrap_or("").parse().unwrap_or_else(|_| unsafe { libc::_exit(94) });
+    let gid: u32 = fields.next().unwrap_or("").parse().unwrap_or_else(|_| unsafe { libc::_exit(94) });
+    let groups: Vec<u32> = fields
+        .next()
+        .unwrap_or("")
+        .split(',')
+        .filter(|group| !group.is_empty())
+        .map(|group| group.parse().unwrap_or_else(|_| unsafe { libc::_exit(94) }))
+        .collect();
+    unsafe {
+        if keep_capabilities && uid != 0 && libc::prctl(8, 1, 0, 0, 0) != 0 {
+            libc::_exit(94);
+        }
+        if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
+            libc::_exit(94);
+        }
+        if libc::setresgid(gid, gid, gid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
+            libc::_exit(94);
         }
     }
 }

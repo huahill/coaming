@@ -67,11 +67,11 @@ class ShimContractTest {
     }
 
     @Test
-    void featuresDoNotClaimUnsupportedCgroupDrivers() {
+    void featuresDeclareSystemdV2ButNotUserOrV1() {
         String json = Features.json();
         assertTrue(json.contains("\"v2\":true"));
         assertTrue(json.contains("\"v1\":false"));
-        assertTrue(json.contains("\"systemd\":false"));
+        assertTrue(json.contains("\"systemd\":true"));
         assertTrue(json.contains("\"systemdUser\":false"));
         assertFalse(json.contains("\"idmap\""));
     }

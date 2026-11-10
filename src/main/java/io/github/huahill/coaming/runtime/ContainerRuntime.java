@@ -9,6 +9,7 @@ import io.github.huahill.coaming.oci.NamespacePlan;
 import io.github.huahill.coaming.oci.OciMount;
 import io.github.huahill.coaming.oci.OciConfig;
 import io.github.huahill.coaming.oci.OciProcess;
+import io.github.huahill.coaming.oci.Rlimit;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -122,7 +123,11 @@ public final class ContainerRuntime {
         }
         args[0] = resolveProgram(args[0], config.env());
         if (config.capabilities() != null) {
-            LinuxCalls.applyCapabilities(config.capabilities());
+            LinuxCalls.dropBounding(config.capabilities());
+        }
+        LinuxCalls.applyIdentity(config.user(), config.rlimits(), config.oomScoreAdj(), config.capabilities() != null);
+        if (config.capabilities() != null) {
+            LinuxCalls.commitCapabilities(config.capabilities());
         }
         if (config.noNewPrivileges()) {
             LinuxCalls.noNewPrivileges();
@@ -179,6 +184,18 @@ public final class ContainerRuntime {
         }
         if (spec.noNewPrivileges()) {
             command.add("--no-new-privs");
+        }
+        if (spec.user() != null) {
+            command.add("--user");
+            command.add(spec.user().encoded());
+        }
+        if (!spec.rlimits().isEmpty()) {
+            command.add("--rlimits");
+            command.add(Rlimit.encoded(spec.rlimits()));
+        }
+        if (spec.oomScoreAdj() != null) {
+            command.add("--oom");
+            command.add(Integer.toString(spec.oomScoreAdj()));
         }
         command.add("--");
         command.addAll(spec.args());

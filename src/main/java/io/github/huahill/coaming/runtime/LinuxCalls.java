@@ -7,6 +7,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import io.github.huahill.coaming.oci.LinuxCapabilities;
+import io.github.huahill.coaming.oci.ProcessUser;
+import io.github.huahill.coaming.oci.Rlimit;
+import java.util.List;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,6 +50,14 @@ final class LinuxCalls {
             ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG));
     private static final MethodHandle CAPSET = downcall("capset", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+    private static final MethodHandle SETRESUID = downcall("setresuid", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle SETRESGID = downcall("setresgid", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle SETGROUPS = downcall("setgroups", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+    private static final MethodHandle SETRLIMIT = downcall("setrlimit", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
     private static final MethodHandle ERRNO_LOCATION = downcall("__errno_location", FunctionDescriptor.of(
             ValueLayout.ADDRESS));
     private static final MethodHandle MEMFD_CREATE = downcall("memfd_create", FunctionDescriptor.of(
@@ -238,7 +249,7 @@ final class LinuxCalls {
         }
     }
 
-    static void applyCapabilities(LinuxCapabilities caps) {
+    static void dropBounding(LinuxCapabilities caps) {
         check(prctl(47, 4, 0, 0, 0), "clear ambient capabilities");
         for (int cap = 0; cap < 64; cap++) {
             boolean want = ((caps.bounding() >>> cap) & 1L) == 1L;
@@ -256,6 +267,9 @@ final class LinuxCalls {
                 check(prctl(24, cap, 0, 0, 0), "drop bounding capability " + cap);
             }
         }
+    }
+
+    static void commitCapabilities(LinuxCapabilities caps) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment header = arena.allocate(8);
             header.set(ValueLayout.JAVA_INT, 0, 0x20080522);
@@ -273,6 +287,50 @@ final class LinuxCalls {
             if (((caps.ambient() >>> cap) & 1L) == 1L) {
                 check(prctl(47, 2, cap, 0, 0), "raise ambient capability " + cap);
             }
+        }
+    }
+
+    static void applyIdentity(ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, boolean keepCapabilities) {
+        if (oomScoreAdj != null) {
+            try {
+                Files.writeString(Path.of("/proc/self/oom_score_adj"), Integer.toString(oomScoreAdj));
+            } catch (java.io.IOException failure) {
+                throw new IllegalStateException("oom score failed", failure);
+            }
+        }
+        for (Rlimit limit : rlimits) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment value = arena.allocate(16);
+                value.set(ValueLayout.JAVA_LONG, 0, limit.soft());
+                value.set(ValueLayout.JAVA_LONG, 8, limit.hard());
+                check((int) SETRLIMIT.invokeExact(limit.resource(), value), "setrlimit " + limit.type());
+            } catch (RuntimeException failure) {
+                throw failure;
+            } catch (Throwable failure) {
+                throw new IllegalStateException("setrlimit failed", failure);
+            }
+        }
+        if (user == null) {
+            return;
+        }
+        if (keepCapabilities && user.uid() != 0) {
+            check(prctl(8, 1, 0, 0, 0), "keep capabilities");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment groups = MemorySegment.NULL;
+            if (!user.additionalGids().isEmpty()) {
+                groups = arena.allocate(ValueLayout.JAVA_INT, user.additionalGids().size());
+                for (int i = 0; i < user.additionalGids().size(); i++) {
+                    groups.setAtIndex(ValueLayout.JAVA_INT, i, user.additionalGids().get(i));
+                }
+            }
+            check((int) SETGROUPS.invokeExact((long) user.additionalGids().size(), groups), "setgroups");
+            check((int) SETRESGID.invokeExact(user.gid(), user.gid(), user.gid()), "setgid");
+            check((int) SETRESUID.invokeExact(user.uid(), user.uid(), user.uid()), "setuid");
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("setuid failed", failure);
         }
     }
 
