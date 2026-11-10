@@ -556,6 +556,11 @@ final class LinuxCalls {
                         throw new IllegalStateException("seccomp rule failed", failure);
                     }
                     if (rc != 0) {
+                        // libseccomp cannot express every name in a multi-arch profile.
+                        // A default-deny profile still blocks the syscall when the rule is skipped.
+                        if (io.github.huahill.coaming.oci.SeccompProfile.ignoreAddResult(rc)) {
+                            continue;
+                        }
                         throw new IllegalStateException("seccomp rule " + name + " failed: " + rc);
                     }
                 }

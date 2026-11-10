@@ -145,6 +145,15 @@ class OciConfigTest {
     }
 
     @Test
+    void skipsSeccompRulesLibseccompCannotExpress() {
+        assertTrue(SeccompProfile.ignoreAddResult(-13));
+        assertTrue(SeccompProfile.ignoreAddResult(-14));
+        assertTrue(SeccompProfile.ignoreAddResult(-22));
+        assertTrue(SeccompProfile.ignoreAddResult(-38));
+        assertFalse(SeccompProfile.ignoreAddResult(-12));
+    }
+
+    @Test
     void acceptsTheHighHostIdKubernetesAssigns() {
         assertEquals((int) 3918528512L, IdMap.bits(3918528512L));
         assertThrows(IllegalArgumentException.class, () -> IdMap.bits(0x1_0000_0000L));

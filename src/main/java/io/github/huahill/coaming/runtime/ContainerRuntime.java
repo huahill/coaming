@@ -265,8 +265,10 @@ public final class ContainerRuntime {
         command.add("exec-init");
         command.add("--pid");
         command.add(Integer.toString(target));
-        command.add("--pid-path");
-        command.add(pidFile.toAbsolutePath().toString());
+        if (pidFile != null) {
+            command.add("--pid-path");
+            command.add(pidFile.toAbsolutePath().toString());
+        }
         command.add("--cwd");
         command.add(spec.cwd());
         for (String variable : spec.env()) {

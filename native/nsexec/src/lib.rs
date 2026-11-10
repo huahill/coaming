@@ -881,9 +881,6 @@ fn enter_exec() {
     let Some(target) = target else {
         unsafe { libc::_exit(77) };
     };
-    let Some(pid_file) = pid_file else {
-        unsafe { libc::_exit(78) };
-    };
     if user.is_empty() {
         unsafe { libc::_exit(82) };
     }
@@ -900,8 +897,10 @@ fn enter_exec() {
             libc::close(pipes[1]);
             let user_pid = read_i32(pipes[0]);
             libc::close(pipes[0]);
-            let pid_path = std::ffi::CString::new(pid_file).expect("exec pid path");
-            write_pid(&pid_path, user_pid);
+            if let Some(pid_file) = pid_file {
+                let pid_path = std::ffi::CString::new(pid_file).expect("exec pid path");
+                write_pid(&pid_path, user_pid);
+            }
             let status = wait_status(pid);
             libc::_exit(if detach { 0 } else { status });
         }

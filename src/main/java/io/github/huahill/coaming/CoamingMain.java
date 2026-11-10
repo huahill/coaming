@@ -68,11 +68,11 @@ public final class CoamingMain {
             }
             case "exec" -> {
                 String process = required(CommandLine.takeOption(rest, "--process"), "--process");
-                String pidFile = required(CommandLine.takeOption(rest, "--pid-file"), "--pid-file");
+                String pidFile = CommandLine.takeOption(rest, "--pid-file");
                 boolean detach = CommandLine.takeFlag(rest, "--detach");
                 acceptUnused(rest);
                 yield ContainerRuntime.exec(
-                        line.root(), only(rest), Path.of(process), Path.of(pidFile), detach);
+                        line.root(), only(rest), Path.of(process), pidFile == null ? null : Path.of(pidFile), detach);
             }
             case "update" -> {
                 String resources = required(CommandLine.takeOption(rest, "--resources"), "--resources");
