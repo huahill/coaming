@@ -290,6 +290,16 @@ final class LinuxCalls {
         }
     }
 
+    static void setApparmor(String profile) {
+        Path modern = Path.of("/proc/self/attr/apparmor/exec");
+        Path target = Files.exists(modern) ? modern : Path.of("/proc/self/attr/exec");
+        try (var output = Files.newOutputStream(target)) {
+            output.write(("exec " + profile).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("apparmor profile " + profile + " was rejected", failure);
+        }
+    }
+
     static void applyIdentity(ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, boolean keepCapabilities) {
         if (oomScoreAdj != null) {
             try {

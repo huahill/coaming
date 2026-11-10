@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -76,6 +77,9 @@ public final class ContainerRuntime {
         } else {
             Cgroups.add(cgroup, pid);
         }
+        if (config.resources() != null) {
+            applyResources(Path.of(cgroup), config.resources());
+        }
         waitUntil(state, "created", "failed");
         return 0;
     }
@@ -122,6 +126,9 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container has no process args");
         }
         args[0] = resolveProgram(args[0], config.env());
+        if (config.apparmorProfile() != null) {
+            LinuxCalls.setApparmor(config.apparmorProfile());
+        }
         if (config.capabilities() != null) {
             LinuxCalls.dropBounding(config.capabilities());
         }
@@ -139,6 +146,20 @@ public final class ContainerRuntime {
         return 1;
     }
 
+
+    private static void applyResources(Path cgroup, io.github.huahill.coaming.json.Json resources) throws Exception {
+        NoSuchFileException missing = null;
+        for (int attempt = 0; attempt < 50; attempt++) {
+            try {
+                Resources.apply(cgroup, resources);
+                return;
+            } catch (NoSuchFileException failure) {
+                missing = failure;
+                Thread.sleep(20);
+            }
+        }
+        throw missing;
+    }
 
     private static void mountOne(Path rootfs, OciMount mount) throws IOException {
         MountPlan.Prepared prepared = MountPlan.prepare(mount);
@@ -196,6 +217,10 @@ public final class ContainerRuntime {
         if (spec.oomScoreAdj() != null) {
             command.add("--oom");
             command.add(Integer.toString(spec.oomScoreAdj()));
+        }
+        if (spec.apparmorProfile() != null) {
+            command.add("--apparmor");
+            command.add(spec.apparmorProfile());
         }
         command.add("--");
         command.addAll(spec.args());

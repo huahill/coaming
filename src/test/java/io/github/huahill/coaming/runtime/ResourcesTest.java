@@ -1,9 +1,11 @@
 package io.github.huahill.coaming.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.github.huahill.coaming.json.Json;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -39,6 +41,10 @@ class ResourcesTest {
 
     @Test
     void writesMemoryAndCpuFiles() throws Exception {
+        Files.writeString(cgroup.resolve("memory.max"), "");
+        Files.writeString(cgroup.resolve("cpu.weight"), "");
+        Files.writeString(cgroup.resolve("cpu.max"), "");
+
         Resources.apply(cgroup, Json.parse("""
                 {"memory":{"limit":-1},"cpu":{"shares":1024,"quota":200000,"period":100000}}
                 """));
@@ -46,5 +52,43 @@ class ResourcesTest {
         assertEquals("max", Files.readString(cgroup.resolve("memory.max")).trim());
         assertEquals("39", Files.readString(cgroup.resolve("cpu.weight")).trim());
         assertEquals("200000 100000", Files.readString(cgroup.resolve("cpu.max")).trim());
+    }
+
+    @Test
+    void writesAPidsLimit() throws Exception {
+        Files.writeString(cgroup.resolve("pids.max"), "");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"pids":{"limit":64}}
+                """));
+
+        assertEquals("64", Files.readString(cgroup.resolve("pids.max")).trim());
+    }
+
+    @Test
+    void doesNotCreateAMissingControllerFile() {
+        assertThrows(NoSuchFileException.class, () -> Resources.apply(cgroup, Json.parse("""
+                {"pids":{"limit":64}}
+                """)));
+    }
+
+    @Test
+    void letsUnifiedOverrideTheStructuredValue() throws Exception {
+        Files.writeString(cgroup.resolve("memory.max"), "");
+        Files.writeString(cgroup.resolve("memory.high"), "");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"memory":{"limit":4096},"unified":{"memory.max":"8192","memory.high":"2048"}}
+                """));
+
+        assertEquals("8192", Files.readString(cgroup.resolve("memory.max")).trim());
+        assertEquals("2048", Files.readString(cgroup.resolve("memory.high")).trim());
+    }
+
+    @Test
+    void rejectsAUnifiedKeyOutsideTheCgroup() {
+        assertThrows(IllegalArgumentException.class, () -> Resources.apply(cgroup, Json.parse("""
+                {"unified":{"../memory.max":"1"}}
+                """)));
     }
 }

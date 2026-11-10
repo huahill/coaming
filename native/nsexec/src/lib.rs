@@ -272,6 +272,7 @@ fn enter_exec() {
     let mut identity = None;
     let mut rlimits = None;
     let mut oom = None;
+    let mut apparmor = None;
     let mut user = Vec::new();
     let mut index = 2usize;
     while index < parts.len() {
@@ -316,6 +317,10 @@ fn enter_exec() {
             }
             "--oom" => {
                 oom = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--apparmor" => {
+                apparmor = parts.get(index + 1).cloned();
                 index += 2;
             }
             "--" => {
@@ -389,6 +394,9 @@ fn enter_exec() {
         if unsafe { libc::chdir(path.as_ptr()) } != 0 {
             unsafe { libc::_exit(87) };
         }
+    }
+    if let Some(profile) = apparmor.as_deref() {
+        set_apparmor(profile);
     }
     if let Some(spec) = caps.as_deref() {
         drop_bounding(spec);
@@ -479,6 +487,20 @@ fn capability_sets(spec: &str) -> (u64, u64, u64, u64, u64) {
         unsafe { libc::_exit(90) };
     }
     (parts[0], parts[1], parts[2], parts[3], parts[4])
+}
+
+#[cfg(target_os = "linux")]
+fn set_apparmor(profile: &str) {
+    for path in ["/proc/self/attr/apparmor/exec", "/proc/self/attr/exec"] {
+        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) {
+            let command = format!("exec {profile}");
+            if std::io::Write::write_all(&mut file, command.as_bytes()).is_err() {
+                unsafe { libc::_exit(95) };
+            }
+            return;
+        }
+    }
+    unsafe { libc::_exit(95) };
 }
 
 #[cfg(target_os = "linux")]

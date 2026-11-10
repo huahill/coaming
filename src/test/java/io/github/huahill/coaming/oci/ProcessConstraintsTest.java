@@ -49,13 +49,12 @@ class ProcessConstraintsTest {
     }
 
     @Test
-    void anAppArmorProfileIsRejected() throws Exception {
+    void anAppArmorProfileIsKept() throws Exception {
         Files.writeString(bundle.resolve("config.json"), """
-                {"process": {"args": ["/bin/true"], "apparmorProfile": "cri-containerd.apparmor.d"}, "root": {"path": "rootfs"}}
+                {"process": {"args": ["/bin/true"], "apparmorProfile": "docker-default"}, "root": {"path": "rootfs"}}
                 """);
 
-        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () -> OciConfig.read(bundle));
-        assertEquals(true, failure.getMessage().contains("apparmor"));
+        assertEquals("docker-default", OciConfig.read(bundle).apparmorProfile());
     }
 
     @Test

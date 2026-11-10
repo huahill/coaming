@@ -146,6 +146,7 @@ class ShimContractTest {
         Files.createDirectories(group);
         Files.writeString(state.resolve("status"), "running");
         Files.writeString(state.resolve("cgroup"), group.toString());
+        Files.writeString(group.resolve("memory.max"), "");
         byte[] body = "{\"memory\":{\"limit\":4096}}".getBytes(StandardCharsets.UTF_8);
 
         ContainerRuntime.update(root, "demo", "-", new ByteArrayInputStream(body));

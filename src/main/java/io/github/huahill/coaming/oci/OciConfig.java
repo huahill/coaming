@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -118,14 +118,19 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         LinuxCapabilities capabilities = LinuxCapabilities.from(process.optional("capabilities"));
         boolean noNewPrivileges = process.optional("noNewPrivileges") != null && process.optional("noNewPrivileges").booleanValue();
         Integer oomScoreAdj = process.optional("oomScoreAdj") == null ? null : (int) process.optional("oomScoreAdj").longValue();
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj);
+        Json resources = linux == null ? null : linux.optional("resources");
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process));
+    }
+
+    private static String apparmorProfile(Json process) {
+        Json apparmor = process.optional("apparmorProfile");
+        if (apparmor == null || apparmor.string().isBlank() || "unconfined".equals(apparmor.string())) {
+            return null;
+        }
+        return apparmor.string();
     }
 
     private static void rejectUnsupportedProfiles(Json process) {
-        Json apparmor = process.optional("apparmorProfile");
-        if (apparmor != null && !apparmor.string().isBlank() && !"unconfined".equals(apparmor.string())) {
-            throw new IllegalArgumentException("apparmor profile is not implemented: " + apparmor.string());
-        }
         Json selinux = process.optional("selinuxLabel");
         if (selinux != null && !selinux.string().isBlank()) {
             throw new IllegalArgumentException("selinux label is not implemented");
