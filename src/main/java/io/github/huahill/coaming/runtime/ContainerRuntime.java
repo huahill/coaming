@@ -13,6 +13,7 @@ import io.github.huahill.coaming.oci.Rlimit;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import io.github.huahill.coaming.oci.IdMap;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -41,12 +42,14 @@ public final class ContainerRuntime {
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
         LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
+        long hostUid = IdMap.hostIdFor(config.uidMappings(), 0);
+        long hostGid = IdMap.hostIdFor(config.gidMappings(), 0);
         String cgroup = null;
         if (!systemd) {
             cgroup = Cgroups.create(id);
             Files.writeString(state.resolve("cgroup"), cgroup);
         }
-        String program = Memfd.copyCurrentExecutable();
+        String program = executableFor(state, hostUid, hostGid);
         List<String> command = new ArrayList<>();
         command.add(program);
         command.add("init");
@@ -54,7 +57,7 @@ public final class ContainerRuntime {
         command.add(state.toString());
         command.add("--bundle");
         command.add(bundle.toAbsolutePath().toString());
-        command.addAll(NamespacePlan.arguments(config.namespaces(), config.namespacesSpecified()));
+        command.addAll(NamespacePlan.arguments(config.namespaces(), config.namespacesSpecified(), config.uidMappings(), config.gidMappings()));
         Process helper = new ProcessBuilder(command).inheritIO().start();
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
@@ -146,6 +149,23 @@ public final class ContainerRuntime {
         return 1;
     }
 
+
+    private static String executableFor(Path state, long hostUid, long hostGid) throws Exception {
+        if (hostUid < 0 || hostGid < 0) {
+            return Memfd.copyCurrentExecutable();
+        }
+        Path copy = state.resolve("coaming");
+        Files.copy(Path.of("/proc/self/exe"), copy, StandardCopyOption.REPLACE_EXISTING);
+        if (!copy.toFile().setExecutable(true, false)) {
+            throw new IllegalStateException("runtime copy is not executable");
+        }
+        try (var paths = Files.walk(state)) {
+            for (Path path : paths.toList()) {
+                LinuxCalls.chown(path.toString(), hostUid, hostGid);
+            }
+        }
+        return copy.toString();
+    }
 
     private static void applyResources(Path cgroup, io.github.huahill.coaming.json.Json resources) throws Exception {
         NoSuchFileException missing = null;

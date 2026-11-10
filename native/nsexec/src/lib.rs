@@ -86,7 +86,11 @@ fn enter_container() {
     if args.is_empty() {
         unsafe { libc::_exit(75) };
     }
-    let (unshare, joins) = namespace_actions(&cmdline_parts());
+    let parts = cmdline_parts();
+    let (mut unshare, mut joins) = namespace_actions(&parts);
+    let uid_map = argument_value("--uid-map").unwrap_or_default();
+    let gid_map = argument_value("--gid-map").unwrap_or_default();
+    prepare_user_namespace(&mut unshare, &mut joins, &uid_map, &gid_map);
     set_env("COAMING_INIT_STAGE", "jvm");
     let mut flags: libc::c_int = 0;
     let mut new_pid = false;
@@ -156,6 +160,132 @@ fn enter_container() {
         argv.push(std::ptr::null());
         libc::execve(args[0].as_ptr(), argv.as_ptr(), environ());
         libc::_exit(72);
+    }
+}
+
+
+#[cfg(target_os = "linux")]
+fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, String)>, uid_map: &str, gid_map: &str) {
+    let create = unshare.iter().any(|kind| kind == "user");
+    let join = joins.iter().find(|(kind, _)| kind == "user").map(|(_, path)| path.clone());
+    unshare.retain(|kind| kind != "user");
+    joins.retain(|(kind, _)| kind != "user");
+    if create && join.is_some() {
+        unsafe { libc::_exit(89) };
+    }
+    if let Some(path) = join {
+        let c_path = std::ffi::CString::new(path).unwrap_or_else(|_| unsafe { libc::_exit(89) });
+        unsafe {
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if fd < 0 || libc::setns(fd, libc::CLONE_NEWUSER) != 0 {
+                libc::_exit(88);
+            }
+            libc::close(fd);
+        }
+        return;
+    }
+    if !create {
+        return;
+    }
+    if uid_map.is_empty() || gid_map.is_empty() {
+        unsafe { libc::_exit(76) };
+    }
+    let mut ready = [0; 2];
+    let mut cont = [0; 2];
+    unsafe {
+        if libc::pipe(ready.as_mut_ptr()) != 0 || libc::pipe(cont.as_mut_ptr()) != 0 {
+            libc::_exit(76);
+        }
+        let pid = libc::fork();
+        if pid < 0 {
+            libc::_exit(76);
+        }
+        if pid > 0 {
+            libc::close(ready[1]);
+            libc::close(cont[0]);
+            read_byte(ready[0]);
+            libc::close(ready[0]);
+            if write_id_maps(pid, uid_map, gid_map).is_err() {
+                libc::_exit(76);
+            }
+            write_byte(cont[1]);
+            libc::close(cont[1]);
+            let status = wait_status(pid);
+            libc::_exit(status);
+        }
+        libc::close(ready[0]);
+        libc::close(cont[1]);
+        if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+            libc::_exit(76);
+        }
+        write_byte(ready[1]);
+        libc::close(ready[1]);
+        read_byte(cont[0]);
+        libc::close(cont[0]);
+        // The process is still host uid 0. That id is outside the new map, so
+        // the namespace sees overflow uid 65534 and execve drops its capabilities.
+        // Container uid 0 is the mapped host id and keeps full namespace caps.
+        if libc::setresgid(0, 0, 0) != 0 || libc::setresuid(0, 0, 0) != 0 {
+            libc::_exit(77);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_id_maps(pid: i32, uid_map: &str, gid_map: &str) -> std::io::Result<()> {
+    std::fs::write(format!("/proc/{pid}/setgroups"), "deny")?;
+    std::fs::write(format!("/proc/{pid}/uid_map"), map_text(uid_map))?;
+    std::fs::write(format!("/proc/{pid}/gid_map"), map_text(gid_map))
+}
+
+#[cfg(target_os = "linux")]
+fn map_text(spec: &str) -> String {
+    let mut text = String::new();
+    for item in spec.split(',').filter(|item| !item.is_empty()) {
+        let mut parts = item.split(':');
+        let Some(container) = parts.next() else { unsafe { libc::_exit(89) } };
+        let Some(host) = parts.next() else { unsafe { libc::_exit(89) } };
+        let Some(size) = parts.next() else { unsafe { libc::_exit(89) } };
+        if parts.next().is_some() {
+            unsafe { libc::_exit(89) };
+        }
+        text.push_str(container);
+        text.push(' ');
+        text.push_str(host);
+        text.push(' ');
+        text.push_str(size);
+        text.push('\n');
+    }
+    text
+}
+
+#[cfg(target_os = "linux")]
+fn read_byte(fd: i32) {
+    let mut byte = [0u8; 1];
+    loop {
+        let rc = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        if rc == 1 {
+            return;
+        }
+        if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe { libc::_exit(76) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_byte(fd: i32) {
+    let byte = [0u8; 1];
+    loop {
+        let rc = unsafe { libc::write(fd, byte.as_ptr().cast(), 1) };
+        if rc == 1 {
+            return;
+        }
+        if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe { libc::_exit(76) };
     }
 }
 

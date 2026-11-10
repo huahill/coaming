@@ -75,6 +75,8 @@ final class LinuxCalls {
     private static final MethodHandle SECCOMP_LOAD = seccomp("seccomp_load", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
     private static final MethodHandle SECCOMP_RELEASE = seccomp("seccomp_release", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+    private static final MethodHandle CHOWN = downcall("chown", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
 
     private static final int RDONLY = 1;
     private static final int MS_REMOUNT = 32;
@@ -248,6 +250,22 @@ final class LinuxCalls {
             throw new IllegalStateException("writing start fifo failed", failure);
         } finally {
             close(fd);
+        }
+    }
+
+    static void chown(String path, long uid, long gid) {
+        if (uid < 0 || gid < 0 || uid > Integer.MAX_VALUE || gid > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("id mapping does not fit chown");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            int rc = (int) CHOWN.invokeExact(arena.allocateFrom(path), (int) uid, (int) gid);
+            if (rc != 0) {
+                throw new IllegalStateException("chown " + path + " failed: " + errno());
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("chown " + path + " failed", failure);
         }
     }
 

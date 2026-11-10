@@ -67,12 +67,13 @@ class ShimContractTest {
     }
 
     @Test
-    void featuresDeclareSystemdV2ButNotUserOrV1() {
+    void featuresDeclareCgroupV2AndUserNamespace() {
         String json = Features.json();
         assertTrue(json.contains("\"v2\":true"));
         assertTrue(json.contains("\"v1\":false"));
         assertTrue(json.contains("\"systemd\":true"));
         assertTrue(json.contains("\"systemdUser\":false"));
+        assertTrue(json.contains("\"user\""));
         assertFalse(json.contains("\"idmap\""));
     }
 

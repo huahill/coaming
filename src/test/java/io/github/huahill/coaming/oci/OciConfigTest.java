@@ -83,10 +83,24 @@ class OciConfigTest {
     }
 
     @Test
-    void userNamespaceIsRejected() {
+    void userNamespaceRequiresMappings() {
         IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
                 () -> NamespacePlan.arguments(List.of(new Namespace("user", null)), true));
-        assertTrue(failure.getMessage().contains("user"));
+        assertTrue(failure.getMessage().contains("uid and gid"));
+    }
+
+    @Test
+    void plansANewUserNamespaceBeforeTheOthers() {
+        List<IdMap> maps = List.of(new IdMap(0, 100000, 65536));
+
+        assertEquals(List.of("--unshare", "user,pid,mount", "--uid-map", "0:100000:65536", "--gid-map", "0:100000:65536"),
+                NamespacePlan.arguments(List.of(new Namespace("pid", null), new Namespace("user", null), new Namespace("mount", null)), true, maps, maps));
+    }
+
+    @Test
+    void joinsAnExistingUserNamespaceWithoutRewritingMaps() {
+        assertEquals(List.of("--unshare", "mount", "--join", "user=/proc/12/ns/user"),
+                NamespacePlan.arguments(List.of(new Namespace("user", "/proc/12/ns/user"), new Namespace("mount", null)), true, List.of(new IdMap(0, 100000, 65536)), List.of(new IdMap(0, 100000, 65536))));
     }
 
 
