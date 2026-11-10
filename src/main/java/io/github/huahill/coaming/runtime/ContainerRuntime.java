@@ -1,7 +1,9 @@
 package io.github.huahill.coaming.runtime;
 
 import io.github.huahill.coaming.json.Json;
+import io.github.huahill.coaming.oci.MountPlan;
 import io.github.huahill.coaming.oci.NamespacePlan;
+import io.github.huahill.coaming.oci.OciMount;
 import io.github.huahill.coaming.oci.OciConfig;
 import io.github.huahill.coaming.oci.OciProcess;
 import java.io.IOException;
@@ -66,12 +68,21 @@ public final class ContainerRuntime {
         Files.writeString(state.resolve("status"), "running");
         Path rootfs = config.root(bundle).toAbsolutePath();
         LinuxCalls.bindPrivate(rootfs.toString());
+        boolean mountsProc = false;
+        for (OciMount mount : config.mounts()) {
+            if ("/proc".equals(mount.destination())) {
+                mountsProc = true;
+            }
+            mountOne(rootfs, mount);
+        }
         Path oldRoot = rootfs.resolve("oldroot");
         Files.createDirectories(oldRoot);
         LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
         LinuxCalls.chdir("/");
         LinuxCalls.umountDetach("/oldroot");
-        LinuxCalls.mountProc("/proc");
+        if (!mountsProc) {
+            LinuxCalls.mountProc("/proc");
+        }
         LinuxCalls.hostname(config.hostname());
         if (!"/".equals(config.cwd())) {
             LinuxCalls.chdir(config.cwd());
@@ -83,6 +94,22 @@ public final class ContainerRuntime {
         args[0] = resolveProgram(args[0], config.env());
         LinuxCalls.exec(args, config.env().toArray(String[]::new));
         return 1;
+    }
+
+
+    private static void mountOne(Path rootfs, OciMount mount) throws IOException {
+        MountPlan.Prepared prepared = MountPlan.prepare(mount);
+        Path dest = rootfs.resolve(mount.destination().substring(1));
+        boolean directory = prepared.fstype() != null || Files.isDirectory(Path.of(prepared.source()));
+        if (directory) {
+            Files.createDirectories(dest);
+        } else if (!Files.exists(dest)) {
+            if (dest.getParent() != null) {
+                Files.createDirectories(dest.getParent());
+            }
+            Files.createFile(dest);
+        }
+        LinuxCalls.mountPrepared(prepared.source(), dest.toString(), prepared.fstype(), prepared.flags(), prepared.remount(), prepared.propagation(), prepared.data());
     }
 
     public static int exec(Path root, String id, Path process, Path pidFile, boolean detach) throws Exception {

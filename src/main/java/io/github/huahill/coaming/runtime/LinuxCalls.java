@@ -63,6 +63,17 @@ final class LinuxCalls {
         check(mount("proc", path, "proc", 0, null), "mount proc");
     }
 
+    static void mountPrepared(String source, String target, String fstype, long flags, long remount, long propagation, String data) {
+        String payload = data == null || data.isEmpty() ? null : data;
+        check(mount(source, target, fstype, flags, payload), "mount " + target);
+        if (remount != 0) {
+            check(mount(null, target, null, remount, null), "remount " + target);
+        }
+        if (propagation != 0) {
+            check(mount(null, target, null, propagation, null), "propagation " + target);
+        }
+    }
+
     static void pivotRoot(String newRoot, String putOld) {
         try (Arena arena = Arena.ofConfined()) {
             long rc = (long) SYSCALL.invokeExact(

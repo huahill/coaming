@@ -89,6 +89,47 @@ class OciConfigTest {
         assertTrue(failure.getMessage().contains("user"));
     }
 
+
+    @Test
+    void readsABindMount() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "mounts": [{"destination": "/data", "type": "bind", "source": "/host/data", "options": ["rbind", "rw", "rprivate"]}]
+                }
+                """);
+
+        OciMount mount = OciConfig.read(bundle).mounts().getFirst();
+
+        assertEquals("/data", mount.destination());
+        assertEquals("/host/data", mount.source());
+    }
+
+    @Test
+    void plansHostPathPropagation() {
+        MountPlan.Prepared prepared = MountPlan.prepare(new OciMount("/data", "bind", "/host/data", List.of("rbind", "rw", "rshared")));
+
+        assertEquals(MountPlan.BIND | MountPlan.REC, prepared.flags());
+        assertEquals(0, prepared.remount());
+        assertEquals(MountPlan.REC | MountPlan.SHARED, prepared.propagation());
+    }
+
+    @Test
+    void readOnlyBindIsARemount() {
+        MountPlan.Prepared prepared = MountPlan.prepare(new OciMount("/data", "bind", "/host/data", List.of("bind", "ro")));
+
+        assertEquals(MountPlan.BIND, prepared.flags());
+        assertEquals(MountPlan.BIND | MountPlan.REMOUNT | MountPlan.RDONLY, prepared.remount());
+        assertEquals(MountPlan.REC | MountPlan.PRIVATE, prepared.propagation());
+    }
+
+    @Test
+    void rejectsAnUnknownMountOption() {
+        assertThrows(IllegalArgumentException.class,
+                () -> MountPlan.prepare(new OciMount("/data", "bind", "/host/data", List.of("nosymfollow"))));
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

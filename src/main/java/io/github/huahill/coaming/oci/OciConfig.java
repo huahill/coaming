@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -45,7 +45,29 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         if (envValue != null) {
             env = envValue.strings();
         }
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env);
+        List<OciMount> mounts = new ArrayList<>();
+        Json mountValues = root.optional("mounts");
+        if (mountValues instanceof Json.Arr arr) {
+            for (Json item : arr.items()) {
+                String mountType = "";
+                Json typeValue = item.optional("type");
+                if (typeValue != null) {
+                    mountType = typeValue.string();
+                }
+                String source = "";
+                Json sourceValue = item.optional("source");
+                if (sourceValue != null) {
+                    source = sourceValue.string();
+                }
+                List<String> options = List.of();
+                Json optionValue = item.optional("options");
+                if (optionValue != null) {
+                    options = optionValue.strings();
+                }
+                mounts.add(new OciMount(item.field("destination").string(), mountType, source, options));
+            }
+        }
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts));
     }
 
     public Path root(Path bundle) {
