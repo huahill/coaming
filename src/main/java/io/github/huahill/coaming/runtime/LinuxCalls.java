@@ -88,6 +88,18 @@ final class LinuxCalls {
         throw new IllegalStateException("mask " + path + " failed: " + err);
     }
 
+    static void readonly(String path) {
+        Path target = Path.of(path);
+        if (!Files.exists(target)) {
+            return;
+        }
+        if (Files.isSymbolicLink(target)) {
+            throw new IllegalStateException("refusing to make symlink read-only " + path);
+        }
+        check(mount(path, path, null, MS_BIND | MS_REC, null), "readonly bind " + path);
+        check(mount(path, path, null, MS_BIND | 32 | 1, null), "readonly remount " + path);
+    }
+
     static void mountPrepared(String source, String target, String fstype, long flags, long remount, long propagation, String data) {
         String payload = data == null || data.isEmpty() ? null : data;
         check(mount(source, target, fstype, flags, payload), "mount " + target);

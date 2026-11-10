@@ -144,6 +144,20 @@ class OciConfigTest {
         assertEquals(List.of("/proc/kcore", "/sys/firmware"), OciConfig.read(bundle).maskedPaths());
     }
 
+
+    @Test
+    void readsReadonlyPaths() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "linux": {"readonlyPaths": ["/proc/sys", "/proc/sysrq-trigger"]}
+                }
+                """);
+
+        assertEquals(List.of("/proc/sys", "/proc/sysrq-trigger"), OciConfig.read(bundle).readonlyPaths());
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

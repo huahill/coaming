@@ -86,6 +86,9 @@ public final class ContainerRuntime {
         for (String masked : config.maskedPaths()) {
             LinuxCalls.mask(masked);
         }
+        for (String readonly : config.readonlyPaths()) {
+            LinuxCalls.readonly(readonly);
+        }
         LinuxCalls.hostname(config.hostname());
         if (!"/".equals(config.cwd())) {
             LinuxCalls.chdir(config.cwd());
