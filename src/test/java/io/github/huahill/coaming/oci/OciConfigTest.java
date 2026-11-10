@@ -130,6 +130,20 @@ class OciConfigTest {
                 () -> MountPlan.prepare(new OciMount("/data", "bind", "/host/data", List.of("nosymfollow"))));
     }
 
+
+    @Test
+    void readsMaskedPaths() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "linux": {"maskedPaths": ["/proc/kcore", "/sys/firmware"]}
+                }
+                """);
+
+        assertEquals(List.of("/proc/kcore", "/sys/firmware"), OciConfig.read(bundle).maskedPaths());
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

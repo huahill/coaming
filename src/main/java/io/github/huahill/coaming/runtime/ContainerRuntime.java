@@ -83,6 +83,9 @@ public final class ContainerRuntime {
         if (!mountsProc) {
             LinuxCalls.mountProc("/proc");
         }
+        for (String masked : config.maskedPaths()) {
+            LinuxCalls.mask(masked);
+        }
         LinuxCalls.hostname(config.hostname());
         if (!"/".equals(config.cwd())) {
             LinuxCalls.chdir(config.cwd());

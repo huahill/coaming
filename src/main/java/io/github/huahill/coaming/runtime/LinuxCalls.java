@@ -7,6 +7,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 final class LinuxCalls {
     private static final Linker LINKER = Linker.nativeLinker();
@@ -42,6 +44,8 @@ final class LinuxCalls {
             ValueLayout.ADDRESS));
     private static final MethodHandle MEMFD_CREATE = downcall("memfd_create", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+    private static final MethodHandle MKNOD = downcall("mknod", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
 
     private static final int MS_REC = 16384;
     private static final int MS_PRIVATE = 1 << 18;
@@ -61,6 +65,27 @@ final class LinuxCalls {
     static void mountProc(String path) {
         mkdir(path);
         check(mount("proc", path, "proc", 0, null), "mount proc");
+    }
+
+    static void mask(String path) {
+        Path target = Path.of(path);
+        if (!Files.exists(target)) {
+            return;
+        }
+        if (Files.isSymbolicLink(target)) {
+            throw new IllegalStateException("refusing to mask symlink " + path);
+        }
+        ensureDevNull();
+        int rc = mount("/dev/null", path, null, MS_BIND, null);
+        if (rc == 0) {
+            return;
+        }
+        int err = errno();
+        if (err == 20) {
+            check(mount("tmpfs", path, "tmpfs", 1, "mode=000"), "mask " + path);
+            return;
+        }
+        throw new IllegalStateException("mask " + path + " failed: " + err);
     }
 
     static void mountPrepared(String source, String target, String fstype, long flags, long remount, long propagation, String data) {
@@ -246,6 +271,23 @@ final class LinuxCalls {
             }
         } catch (Throwable failure) {
             throw new IllegalStateException("mkdir " + path + " failed", failure);
+        }
+    }
+
+    private static void ensureDevNull() {
+        if (Files.exists(Path.of("/dev/null"))) {
+            return;
+        }
+        mkdir("/dev");
+        try (Arena arena = Arena.ofConfined()) {
+            int rc = (int) MKNOD.invokeExact(arena.allocateFrom("/dev/null"), 8192 | 438, 259L);
+            if (rc != 0 && errno() != 17) {
+                throw new IllegalStateException("mknod /dev/null failed: " + errno());
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("mknod /dev/null failed", failure);
         }
     }
 

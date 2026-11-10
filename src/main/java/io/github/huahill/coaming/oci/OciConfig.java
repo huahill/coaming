@@ -7,7 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -67,7 +67,14 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
                 mounts.add(new OciMount(item.field("destination").string(), mountType, source, options));
             }
         }
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts));
+        List<String> maskedPaths = List.of();
+        if (linux != null) {
+            Json masked = linux.optional("maskedPaths");
+            if (masked != null) {
+                maskedPaths = masked.strings();
+            }
+        }
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths);
     }
 
     public Path root(Path bundle) {
