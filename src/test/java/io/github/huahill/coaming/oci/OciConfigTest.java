@@ -145,6 +145,35 @@ class OciConfigTest {
     }
 
     @Test
+    void plansAnIdmappedBindWithoutPassingTheOptionToMount() {
+        MountPlan.Prepared prepared = MountPlan.prepare(new OciMount(
+                "/data", "bind", "/host/data", List.of("bind", "ro", "idmap")));
+
+        assertEquals(MountPlan.Idmap.MOUNT, prepared.idmap());
+        assertEquals("", prepared.data());
+        assertEquals(List.of("--idmap", "/host/data", "/data", "0", "0", "1048577", "278528"),
+                IdmapPlan.arguments(List.of(new OciMount("/data", "bind", "/host/data", List.of("bind", "ro", "idmap"))), List.of(new IdMap(0, 100000, 65536)), List.of(new IdMap(0, 100000, 65536)), true));
+    }
+
+    @Test
+    void rejectsIdmapWithoutANewUserNamespace() {
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> IdmapPlan.arguments(List.of(new OciMount("/data", "bind", "/host/data", List.of("bind", "idmap"))), List.of(), List.of(), false));
+
+        assertTrue(failure.getMessage().contains("idmap"));
+    }
+
+    @Test
+    void rejectsMountMappingsThatDifferFromTheContainer() {
+        OciMount mount = new OciMount("/data", "bind", "/host/data", List.of("bind", "ridmap"), List.of(new IdMap(0, 200000, 65536)), List.of(new IdMap(0, 200000, 65536)));
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> IdmapPlan.arguments(List.of(mount), List.of(new IdMap(0, 100000, 65536)), List.of(new IdMap(0, 100000, 65536)), true));
+
+        assertTrue(failure.getMessage().contains("match"));
+    }
+
+    @Test
     void acceptsTheMountsAKubernetesPodUses() {
         MountPlan.Prepared dev = MountPlan.prepare(new OciMount(
                 "/dev", "tmpfs", "tmpfs", List.of("nosuid", "strictatime", "mode=755", "size=65536k")));

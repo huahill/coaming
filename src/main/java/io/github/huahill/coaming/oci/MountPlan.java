@@ -21,9 +21,11 @@ public final class MountPlan {
     public static final long STRICTATIME = 1L << 24;
     public static final long LAZYTIME = 1L << 25;
 
+    public enum Idmap { NONE, MOUNT, RECURSIVE }
+
     private MountPlan() {}
 
-    public record Prepared(String source, String fstype, long flags, long remount, long propagation, String data) {}
+    public record Prepared(String source, String fstype, long flags, long remount, long propagation, String data, Idmap idmap) {}
 
     public static Prepared prepare(OciMount mount) {
         if (mount.destination() == null || !mount.destination().startsWith("/") || "/".equals(mount.destination())) {
@@ -36,6 +38,7 @@ public final class MountPlan {
         long propagation = 0;
         boolean sawPropagation = false;
         long flags = 0;
+        Idmap idmap = Idmap.NONE;
         List<String> data = new ArrayList<>();
         for (String option : mount.options()) {
             switch (option) {
@@ -56,6 +59,18 @@ public final class MountPlan {
                 case "relatime" -> flags |= RELATIME;
                 case "strictatime" -> flags |= STRICTATIME;
                 case "lazytime" -> flags |= LAZYTIME;
+                case "idmap" -> {
+                    if (idmap == Idmap.RECURSIVE) {
+                        throw new IllegalArgumentException("idmap and ridmap cannot both be set");
+                    }
+                    idmap = Idmap.MOUNT;
+                }
+                case "ridmap" -> {
+                    if (idmap == Idmap.MOUNT) {
+                        throw new IllegalArgumentException("idmap and ridmap cannot both be set");
+                    }
+                    idmap = Idmap.RECURSIVE;
+                }
                 case "newinstance" -> data.add(option);
                 case "private" -> {
                     propagation = PRIVATE;
@@ -98,6 +113,9 @@ public final class MountPlan {
                 }
             }
         }
+        if (idmap != Idmap.NONE && !bind) {
+            throw new IllegalArgumentException("idmap requires a bind mount");
+        }
         if (bind) {
             flags |= BIND;
             if (recursive) {
@@ -120,12 +138,12 @@ public final class MountPlan {
             if (bind) {
                 throw new IllegalArgumentException("cgroup mount cannot be a bind");
             }
-            return new Prepared("cgroup2", "cgroup2", flags, remount, propagation, String.join(",", data));
+            return new Prepared("cgroup2", "cgroup2", flags, remount, propagation, String.join(",", data), Idmap.NONE);
         }
         if (bind && !source.startsWith("/")) {
             throw new IllegalArgumentException("bind source must be absolute");
         }
         String fstype = bind ? null : type;
-        return new Prepared(source, fstype, flags, remount, propagation, String.join(",", data));
+        return new Prepared(source, fstype, flags, remount, propagation, String.join(",", data), idmap);
     }
 }

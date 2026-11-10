@@ -64,7 +64,7 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
                 if (optionValue != null) {
                     options = optionValue.strings();
                 }
-                mounts.add(new OciMount(item.field("destination").string(), mountType, source, options));
+                mounts.add(new OciMount(item.field("destination").string(), mountType, source, options, IdMap.list(item, "uidMappings"), IdMap.list(item, "gidMappings")));
             }
         }
         List<String> maskedPaths = List.of();

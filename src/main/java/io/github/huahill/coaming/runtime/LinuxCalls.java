@@ -25,6 +25,9 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle SYSCALL = downcall("syscall", FunctionDescriptor.of(
             ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+    private static final MethodHandle MOVE_MOUNT = downcall("syscall", FunctionDescriptor.of(
+            ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle SETHOSTNAME = downcall("sethostname", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
     private static final MethodHandle MKFIFO = downcall("mkfifo", FunctionDescriptor.of(
@@ -153,6 +156,25 @@ final class LinuxCalls {
         }
         if (propagation != 0) {
             check(mount(null, target, null, propagation, null), "propagation " + target);
+        }
+    }
+
+    static void moveMount(int descriptor, String target) {
+        try (Arena arena = Arena.ofConfined()) {
+            long rc = (long) MOVE_MOUNT.invokeExact(
+                    (long) moveMountNumber(),
+                    descriptor,
+                    arena.allocateFrom(""),
+                    -100,
+                    arena.allocateFrom(target),
+                    4);
+            if (rc != 0) {
+                throw new IllegalStateException("move_mount " + target + " failed: " + errno());
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("move_mount " + target + " failed", failure);
         }
     }
 
@@ -633,6 +655,13 @@ final class LinuxCalls {
             case "aarch64" -> 41;
             case "amd64", "x86_64" -> 155;
             default -> throw new IllegalStateException("no pivot_root syscall for " + System.getProperty("os.arch"));
+        };
+    }
+
+    private static int moveMountNumber() {
+        return switch (System.getProperty("os.arch")) {
+            case "aarch64", "amd64", "x86_64" -> 429;
+            default -> throw new IllegalStateException("no move_mount syscall for " + System.getProperty("os.arch"));
         };
     }
 

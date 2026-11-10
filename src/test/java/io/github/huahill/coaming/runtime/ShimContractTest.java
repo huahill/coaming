@@ -74,14 +74,14 @@ class ShimContractTest {
         assertTrue(json.contains("\"systemd\":true"));
         assertTrue(json.contains("\"systemdUser\":false"));
         assertTrue(json.contains("\"user\""));
-        assertFalse(json.contains("\"idmap\""));
+        assertTrue(json.contains("\"idmap\":{\"enabled\":true}"));
     }
 
     @Test
     void featuresCommandPrintsThatDocument() throws Exception {
         String output = capture(() -> CoamingMain.run(new String[] {"features"}));
         assertTrue(output.contains("\"v2\":true"));
-        assertFalse(output.contains("\"idmap\""));
+        assertTrue(output.contains("\"idmap\":{\"enabled\":true}"));
     }
 
     @Test

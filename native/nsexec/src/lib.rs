@@ -173,6 +173,11 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
     if create && join.is_some() {
         unsafe { libc::_exit(89) };
     }
+    let requests = idmap_requests();
+    if !requests.is_empty() && !create {
+        complain("idmap requires a new user namespace");
+        unsafe { libc::_exit(78) };
+    }
     if let Some(path) = join {
         let c_path = std::ffi::CString::new(path).unwrap_or_else(|_| unsafe { libc::_exit(89) });
         unsafe {
@@ -192,7 +197,14 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
     }
     let mut ready = [0; 2];
     let mut cont = [0; 2];
+    let mut idmap_socks = [-1; 2];
     unsafe {
+        if !requests.is_empty()
+            && libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, idmap_socks.as_mut_ptr()) != 0
+        {
+            complain("idmap failed: socketpair");
+            libc::_exit(78);
+        }
         if libc::pipe(ready.as_mut_ptr()) != 0 || libc::pipe(cont.as_mut_ptr()) != 0 {
             libc::_exit(76);
         }
@@ -203,10 +215,21 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
         if pid > 0 {
             libc::close(ready[1]);
             libc::close(cont[0]);
+            if idmap_socks[1] >= 0 {
+                libc::close(idmap_socks[1]);
+            }
             read_byte(ready[0]);
             libc::close(ready[0]);
             if write_id_maps(pid, uid_map, gid_map).is_err() {
+                libc::kill(pid, libc::SIGKILL);
                 libc::_exit(76);
+            }
+            if !requests.is_empty() && !prepare_idmaps(pid, idmap_socks[0], &requests) {
+                libc::kill(pid, libc::SIGKILL);
+                libc::_exit(78);
+            }
+            if idmap_socks[0] >= 0 {
+                libc::close(idmap_socks[0]);
             }
             write_byte(cont[1]);
             libc::close(cont[1]);
@@ -215,6 +238,9 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
         }
         libc::close(ready[0]);
         libc::close(cont[1]);
+        if idmap_socks[0] >= 0 {
+            libc::close(idmap_socks[0]);
+        }
         if libc::unshare(libc::CLONE_NEWUSER) != 0 {
             libc::_exit(76);
         }
@@ -222,12 +248,230 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
         libc::close(ready[1]);
         read_byte(cont[0]);
         libc::close(cont[0]);
+        if !requests.is_empty() {
+            receive_idmaps(idmap_socks[1], &requests);
+            libc::close(idmap_socks[1]);
+        }
         // The process is still host uid 0. That id is outside the new map, so
         // the namespace sees overflow uid 65534 and execve drops its capabilities.
         // Container uid 0 is the mapped host id and keeps full namespace caps.
         if libc::setresgid(0, 0, 0) != 0 || libc::setresuid(0, 0, 0) != 0 {
             libc::_exit(77);
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct IdmapRequest {
+    source: String,
+    dest: String,
+    recursive_open: bool,
+    recursive_attr: bool,
+    attr_set: u64,
+    propagation: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn idmap_requests() -> Vec<IdmapRequest> {
+    let parts = cmdline_parts();
+    let mut requests = Vec::new();
+    let mut index = 0usize;
+    while index < parts.len() {
+        if parts[index] != "--idmap" {
+            index += 1;
+            continue;
+        }
+        if index + 6 >= parts.len() {
+            unsafe { libc::_exit(89) };
+        }
+        let recursive_open = match parts[index + 3].as_str() {
+            "1" => true,
+            "0" => false,
+            _ => unsafe { libc::_exit(89) },
+        };
+        let recursive_attr = match parts[index + 4].as_str() {
+            "1" => true,
+            "0" => false,
+            _ => unsafe { libc::_exit(89) },
+        };
+        let Ok(attr_set) = parts[index + 5].parse::<u64>() else {
+            unsafe { libc::_exit(89) };
+        };
+        let Ok(propagation) = parts[index + 6].parse::<u64>() else {
+            unsafe { libc::_exit(89) };
+        };
+        requests.push(IdmapRequest {
+            source: parts[index + 1].clone(),
+            dest: parts[index + 2].clone(),
+            recursive_open,
+            recursive_attr,
+            attr_set,
+            propagation,
+        });
+        index += 7;
+    }
+    requests
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_idmaps(pid: i32, sock: i32, requests: &[IdmapRequest]) -> bool {
+    let path = std::ffi::CString::new(format!("/proc/{pid}/ns/user")).expect("user namespace");
+    let userns = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if userns < 0 {
+        complain(&format!("idmap failed: open user namespace: {}", std::io::Error::last_os_error()));
+        return false;
+    }
+    for request in requests {
+        let mut flags = 1 | libc::O_CLOEXEC;
+        if request.recursive_open {
+            flags |= libc::AT_RECURSIVE;
+        }
+        let Ok(source) = std::ffi::CString::new(request.source.clone()) else {
+            complain("idmap failed: source path contains NUL");
+            unsafe { libc::close(userns) };
+            return false;
+        };
+        let mounted = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) } as i32;
+        if mounted < 0 {
+            complain(&idmap_failure("open_tree", &request.source));
+            unsafe { libc::close(userns) };
+            return false;
+        }
+        let mut setattr_flags = libc::AT_EMPTY_PATH;
+        // MS_REC is rejected unless mount_setattr itself is recursive.
+        let mut propagation = request.propagation;
+        if request.recursive_attr {
+            setattr_flags |= libc::AT_RECURSIVE;
+        } else {
+            propagation &= !16384;
+        }
+        let attr = MountAttr {
+            attr_set: request.attr_set | 0x0010_0000,
+            attr_clr: 0,
+            propagation,
+            userns_fd: userns as u64,
+        };
+        let empty = std::ffi::CString::new("").unwrap();
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_mount_setattr,
+                mounted,
+                empty.as_ptr(),
+                setattr_flags,
+                &attr as *const MountAttr,
+                std::mem::size_of::<MountAttr>(),
+            )
+        };
+        if rc != 0 {
+            complain(&idmap_failure("mount_setattr", &request.source));
+            unsafe {
+                libc::close(mounted);
+                libc::close(userns);
+            }
+            return false;
+        }
+        if !send_fd(sock, mounted) {
+            complain(&format!("idmap failed: pass mount: {}", std::io::Error::last_os_error()));
+            unsafe {
+                libc::close(mounted);
+                libc::close(userns);
+            }
+            return false;
+        }
+        unsafe { libc::close(mounted) };
+    }
+    unsafe { libc::close(userns) };
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn receive_idmaps(sock: i32, requests: &[IdmapRequest]) {
+    set_env("COAMING_IDMAP_COUNT", &requests.len().to_string());
+    for (index, request) in requests.iter().enumerate() {
+        let Some(fd) = recv_fd(sock) else {
+            complain("idmap failed: missing prepared mount");
+            unsafe { libc::_exit(78) };
+        };
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
+            complain("idmap failed: keep prepared mount");
+            unsafe { libc::_exit(78) };
+        }
+        set_env(&format!("COAMING_IDMAP_FD_{index}"), &fd.to_string());
+        set_env(&format!("COAMING_IDMAP_DST_{index}"), &request.dest);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_fd(sock: i32, fd: i32) -> bool {
+    unsafe {
+        let mut byte = [1u8; 1];
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        let space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as libc::c_uint) as usize;
+        let mut buffer = vec![0u8; space];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = buffer.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        let hdr = libc::CMSG_FIRSTHDR(&msg);
+        if hdr.is_null() {
+            return false;
+        }
+        (*hdr).cmsg_level = libc::SOL_SOCKET;
+        (*hdr).cmsg_type = libc::SCM_RIGHTS;
+        (*hdr).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as libc::c_uint) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(hdr) as *mut i32, fd);
+        libc::sendmsg(sock, &msg, 0) == 1
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recv_fd(sock: i32) -> Option<i32> {
+    unsafe {
+        let mut byte = [0u8; 1];
+        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        let space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as libc::c_uint) as usize;
+        let mut buffer = vec![0u8; space];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = buffer.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        if libc::recvmsg(sock, &mut msg, 0) < 1 {
+            return None;
+        }
+        let hdr = libc::CMSG_FIRSTHDR(&msg);
+        if hdr.is_null() || (*hdr).cmsg_level != libc::SOL_SOCKET || (*hdr).cmsg_type != libc::SCM_RIGHTS {
+            return None;
+        }
+        Some(std::ptr::read_unaligned(libc::CMSG_DATA(hdr) as *const i32))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn idmap_failure(action: &str, path: &str) -> String {
+    let err = std::io::Error::last_os_error();
+    let prefix = match err.raw_os_error() {
+        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => "idmap is not supported",
+        _ => "idmap failed",
+    };
+    format!("{prefix}: {action} {path}: {err}")
+}
+
+#[cfg(target_os = "linux")]
+fn complain(message: &str) {
+    let text = format!("coaming: {message}\n");
+    unsafe {
+        libc::write(2, text.as_ptr().cast(), text.len());
     }
 }
 

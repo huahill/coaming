@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import io.github.huahill.coaming.oci.IdMap;
+import io.github.huahill.coaming.oci.IdmapPlan;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -58,11 +59,12 @@ public final class ContainerRuntime {
         command.add("--bundle");
         command.add(bundle.toAbsolutePath().toString());
         command.addAll(NamespacePlan.arguments(config.namespaces(), config.namespacesSpecified(), config.uidMappings(), config.gidMappings()));
+        command.addAll(IdmapPlan.arguments(config.mounts(), config.uidMappings(), config.gidMappings(), createsUserNamespace(config)));
         Process helper = new ProcessBuilder(command).inheritIO().start();
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
             Files.writeString(state.resolve("status"), "failed");
-            throw new IllegalStateException("init helper exited " + helperExit);
+            throw new IllegalStateException(helperExit == 78 ? "idmap mount failed" : "init helper exited " + helperExit);
         }
         if (pidFile != null) {
             if (pidFile.getParent() != null) {
@@ -97,11 +99,12 @@ public final class ContainerRuntime {
         Path rootfs = config.root(bundle).toAbsolutePath();
         LinuxCalls.bindPrivate(rootfs.toString());
         boolean mountsProc = false;
+        java.util.Map<String, Integer> idmaps = IdmapPlan.descriptors(System::getenv);
         for (OciMount mount : config.mounts()) {
             if ("/proc".equals(mount.destination())) {
                 mountsProc = true;
             }
-            mountOne(rootfs, mount);
+            mountOne(rootfs, mount, idmaps);
         }
         Path oldRoot = rootfs.resolve("oldroot");
         Files.createDirectories(oldRoot);
@@ -181,7 +184,19 @@ public final class ContainerRuntime {
         throw missing;
     }
 
-    private static void mountOne(Path rootfs, OciMount mount) throws IOException {
+    private static boolean createsUserNamespace(OciConfig config) {
+        if (!config.namespacesSpecified()) {
+            return false;
+        }
+        for (io.github.huahill.coaming.oci.Namespace namespace : config.namespaces()) {
+            if ("user".equals(namespace.type()) && (namespace.path() == null || namespace.path().isBlank())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void mountOne(Path rootfs, OciMount mount, java.util.Map<String, Integer> idmaps) throws IOException {
         MountPlan.Prepared prepared = MountPlan.prepare(mount);
         Path dest = rootfs.resolve(mount.destination().substring(1));
         boolean directory = prepared.fstype() != null || Files.isDirectory(Path.of(prepared.source()));
@@ -192,6 +207,14 @@ public final class ContainerRuntime {
                 Files.createDirectories(dest.getParent());
             }
             Files.createFile(dest);
+        }
+        if (prepared.idmap() != MountPlan.Idmap.NONE) {
+            Integer descriptor = idmaps.get(mount.destination());
+            if (descriptor == null) {
+                throw new IllegalStateException("idmap mount was not prepared: " + mount.destination());
+            }
+            LinuxCalls.moveMount(descriptor, dest.toString());
+            return;
         }
         LinuxCalls.mountPrepared(prepared.source(), dest.toString(), prepared.fstype(), prepared.flags(), prepared.remount(), prepared.propagation(), prepared.data());
     }
