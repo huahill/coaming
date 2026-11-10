@@ -48,7 +48,7 @@ public final class CoamingMain {
                 String pidFile = CommandLine.takeOption(rest, "--pid-file");
                 acceptUnused(rest);
                 yield ContainerRuntime.create(
-                        line.root(), Path.of(bundle), only(rest), pidFile == null ? null : Path.of(pidFile));
+                        line.root(), Path.of(bundle), only(rest), pidFile == null ? null : Path.of(pidFile), line.systemdCgroup());
             }
             case "init" -> ContainerRuntime.init(
                     Path.of(required(CommandLine.takeOption(rest, "--state"), "--state")),

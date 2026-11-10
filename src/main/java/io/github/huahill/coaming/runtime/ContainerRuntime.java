@@ -21,7 +21,7 @@ import java.util.Locale;
 public final class ContainerRuntime {
     private ContainerRuntime() {}
 
-    public static int create(Path root, Path bundle, String id, Path pidFile) throws Exception {
+    public static int create(Path root, Path bundle, String id, Path pidFile, boolean systemd) throws Exception {
         requireLinux();
         Path state = containerDir(root, id);
         if (Files.exists(state)) {
@@ -33,8 +33,11 @@ public final class ContainerRuntime {
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
         LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
-        String cgroup = Cgroups.create(id);
-        Files.writeString(state.resolve("cgroup"), cgroup);
+        String cgroup = null;
+        if (!systemd) {
+            cgroup = Cgroups.create(id);
+            Files.writeString(state.resolve("cgroup"), cgroup);
+        }
         String program = Memfd.copyCurrentExecutable();
         List<String> command = new ArrayList<>();
         command.add(program);
@@ -57,7 +60,15 @@ public final class ContainerRuntime {
             Files.copy(state.resolve("pid"), pidFile, StandardCopyOption.REPLACE_EXISTING);
         }
         int pid = Integer.parseInt(Files.readString(state.resolve("pid")).trim());
-        Cgroups.add(cgroup, pid);
+        if (systemd) {
+            SystemdCgroup.Scope scope = SystemdCgroup.scope(config.cgroupsPath(), id);
+            SystemdBus.startScope(scope.unit(), scope.slice(), pid);
+            cgroup = "/sys/fs/cgroup" + scope.filesystemPath();
+            Files.writeString(state.resolve("cgroup"), cgroup);
+            Files.writeString(state.resolve("systemd-unit"), scope.unit());
+        } else {
+            Cgroups.add(cgroup, pid);
+        }
         waitUntil(state, "created", "failed");
         return 0;
     }
@@ -203,7 +214,13 @@ public final class ContainerRuntime {
         if (force || "created".equals(status) || "running".equals(status)) {
             signalCreatedOrForced(root, id, state);
         }
-        if (Files.exists(state.resolve("cgroup"))) {
+        if (Files.exists(state.resolve("systemd-unit"))) {
+            try {
+                SystemdBus.stop(Files.readString(state.resolve("systemd-unit")).trim());
+            } catch (RuntimeException ignored) {
+                // The scope may already have stopped with its last process.
+            }
+        } else if (Files.exists(state.resolve("cgroup"))) {
             Cgroups.remove(Files.readString(state.resolve("cgroup")).trim());
         }
         deleteTree(state);
