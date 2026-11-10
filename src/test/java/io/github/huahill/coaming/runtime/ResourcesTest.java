@@ -2,6 +2,7 @@ package io.github.huahill.coaming.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.huahill.coaming.json.Json;
 import java.nio.file.Files;
@@ -19,6 +20,16 @@ class ResourcesTest {
         assertEquals("+cpu +memory +pids", Cgroups.enableLine("cpuset cpu io memory hugetlb pids", ""));
         assertEquals("+memory", Cgroups.enableLine("cpu memory", "cpu"));
         assertEquals("", Cgroups.enableLine("cpuset cpu memory", "cpu memory"));
+    }
+
+    @Test
+    void rootlessUsesTheDelegatedCgroup() {
+        assertEquals(Path.of("/sys/fs/cgroup"), Cgroups.parent(0, "0::/user.slice/user-1000.slice\n"));
+        assertEquals(Path.of("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"),
+                Cgroups.parent(1000, "0::/user.slice/user-1000.slice/user@1000.service\n"));
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> Cgroups.parent(1000, "0::/\n"));
+        assertTrue(failure.getMessage().contains("delegated"));
+        assertEquals(1000, Cgroups.euid("Name:\tdemo\nUid:\t1000\t1000\t1000\t1000\n"));
     }
 
 

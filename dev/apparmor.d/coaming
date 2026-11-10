@@ -1,0 +1,18 @@
+# Ubuntu denies capabilities inside an unprivileged user namespace unless the
+# executable has a profile that opts in, the same arrangement runc and crun use.
+abi <abi/5.0>,
+include <tunables/global>
+
+profile coaming /usr/local/bin/coaming flags=(unconfined) {
+  userns,
+  @{exec_path} mr,
+
+  include if exists <local/coaming>
+}
+
+profile coaming-bin /usr/bin/coaming flags=(unconfined) {
+  userns,
+  @{exec_path} mr,
+
+  include if exists <local/coaming-bin>
+}

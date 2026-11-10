@@ -64,7 +64,12 @@ public final class ContainerRuntime {
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
             Files.writeString(state.resolve("status"), "failed");
-            throw new IllegalStateException(helperExit == 78 ? "idmap mount failed" : "init helper exited " + helperExit);
+            String reason = switch (helperExit) {
+                case 78 -> "idmap mount failed";
+                case 79 -> "rootless id mapping failed";
+                default -> "init helper exited " + helperExit;
+            };
+            throw new IllegalStateException(reason);
         }
         if (pidFile != null) {
             if (pidFile.getParent() != null) {
@@ -156,6 +161,9 @@ public final class ContainerRuntime {
     private static String executableFor(Path state, long hostUid, long hostGid) throws Exception {
         if (hostUid < 0 || hostGid < 0) {
             return Memfd.copyCurrentExecutable();
+        }
+        if (hostUid == Cgroups.euid(Files.readString(Path.of("/proc/self/status")))) {
+            return Path.of("/proc/self/exe").toRealPath().toString();
         }
         Path copy = state.resolve("coaming");
         Files.copy(Path.of("/proc/self/exe"), copy, StandardCopyOption.REPLACE_EXISTING);

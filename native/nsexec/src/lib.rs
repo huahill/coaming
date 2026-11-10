@@ -222,7 +222,7 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
             libc::close(ready[0]);
             if write_id_maps(pid, uid_map, gid_map).is_err() {
                 libc::kill(pid, libc::SIGKILL);
-                libc::_exit(76);
+                libc::_exit(if libc::geteuid() == 0 { 76 } else { 79 });
             }
             if !requests.is_empty() && !prepare_idmaps(pid, idmap_socks[0], &requests) {
                 libc::kill(pid, libc::SIGKILL);
@@ -478,8 +478,68 @@ fn complain(message: &str) {
 #[cfg(target_os = "linux")]
 fn write_id_maps(pid: i32, uid_map: &str, gid_map: &str) -> std::io::Result<()> {
     std::fs::write(format!("/proc/{pid}/setgroups"), "deny")?;
-    std::fs::write(format!("/proc/{pid}/uid_map"), map_text(uid_map))?;
-    std::fs::write(format!("/proc/{pid}/gid_map"), map_text(gid_map))
+    if unsafe { libc::geteuid() } == 0 || (self_map(uid_map, unsafe { libc::geteuid() }) && self_map(gid_map, unsafe { libc::getegid() })) {
+        std::fs::write(format!("/proc/{pid}/uid_map"), map_text(uid_map))?;
+        return std::fs::write(format!("/proc/{pid}/gid_map"), map_text(gid_map));
+    }
+    if !run_map_helper("newuidmap", pid, uid_map) || !run_map_helper("newgidmap", pid, gid_map) {
+        return Err(std::io::Error::other("rootless id mapping failed"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn self_map(spec: &str, id: u32) -> bool {
+    let mut ranges = spec.split(',').filter(|item| !item.is_empty());
+    let Some(only) = ranges.next() else { return false };
+    if ranges.next().is_some() {
+        return false;
+    }
+    let mut parts = only.split(':');
+    let Some(_container) = parts.next() else { return false };
+    let Some(host) = parts.next() else { return false };
+    let Some(size) = parts.next() else { return false };
+    parts.next().is_none() && host == id.to_string() && size == "1"
+}
+
+#[cfg(target_os = "linux")]
+fn run_map_helper(program: &str, pid: i32, spec: &str) -> bool {
+    let mut args = vec![program.to_string(), pid.to_string()];
+    for item in spec.split(',').filter(|item| !item.is_empty()) {
+        let mut parts = item.split(':');
+        let Some(container) = parts.next() else { return false };
+        let Some(host) = parts.next() else { return false };
+        let Some(size) = parts.next() else { return false };
+        if parts.next().is_some() {
+            return false;
+        }
+        args.push(container.to_string());
+        args.push(host.to_string());
+        args.push(size.to_string());
+    }
+    let c_args: Vec<std::ffi::CString> = args
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.clone()).unwrap_or_else(|_| unsafe { libc::_exit(89) }))
+        .collect();
+    let mut argv: Vec<*const libc::c_char> = c_args.iter().map(|arg| arg.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    unsafe {
+        let child = libc::fork();
+        if child < 0 {
+            complain(&format!("rootless id mapping failed: cannot run {program}"));
+            return false;
+        }
+        if child == 0 {
+            libc::execvp(argv[0], argv.as_ptr());
+            libc::_exit(127);
+        }
+        let status = wait_status(child);
+        if status != 0 {
+            complain(&format!("rootless id mapping failed: {program} exited {status}"));
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(target_os = "linux")]

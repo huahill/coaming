@@ -15,10 +15,52 @@ final class Cgroups {
         if (!Files.isDirectory(root)) {
             throw new IllegalStateException("cgroup v2 is not mounted at /sys/fs/cgroup");
         }
-        enable(root);
-        Path dir = root.resolve("coaming-" + id);
+        long uid = euid(Files.readString(Path.of("/proc/self/status")));
+        Path base = parent(uid, Files.readString(Path.of("/proc/self/cgroup")));
+        if (uid == 0) {
+            enable(base);
+        }
+        Path dir = base.resolve("coaming-" + id);
+        try {
         Files.createDirectories(dir);
+        } catch (IOException failure) {
+            if (uid != 0) {
+                throw new IllegalStateException("no delegated cgroup v2 for this user", failure);
+            }
+            throw failure;
+        }
         return dir.toString();
+    }
+
+    static Path parent(long uid, String selfCgroup) {
+        if (uid == 0) {
+            return Path.of("/sys/fs/cgroup");
+        }
+        String path = "/";
+        for (String line : selfCgroup.split("\\R")) {
+            int marker = line.indexOf("::");
+            if (marker >= 0) {
+                path = line.substring(marker + 2).trim();
+                break;
+            }
+        }
+        if (!path.startsWith("/") || "/".equals(path)) {
+            throw new IllegalStateException("no delegated cgroup v2 for this user");
+        }
+        return Path.of("/sys/fs/cgroup" + path);
+    }
+
+    static long euid(String status) {
+        for (String line : status.split("\\R")) {
+            if (!line.startsWith("Uid:")) {
+                continue;
+            }
+            String[] fields = line.trim().split("\\s+");
+            if (fields.length >= 3) {
+                return Long.parseLong(fields[2]);
+            }
+        }
+        throw new IllegalStateException("cannot read the effective uid");
     }
 
     static String enableLine(String available, String current) {
