@@ -3,6 +3,7 @@ package io.github.huahill.coaming.runtime;
 import io.github.huahill.coaming.json.Json;
 import io.github.huahill.coaming.oci.DeviceNode;
 import io.github.huahill.coaming.oci.DevicePolicy;
+import io.github.huahill.coaming.oci.SystemdDevices;
 import io.github.huahill.coaming.oci.MountPlan;
 import io.github.huahill.coaming.oci.NamespacePlan;
 import io.github.huahill.coaming.oci.OciMount;
@@ -28,7 +29,12 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container already exists: " + id);
         }
         OciConfig config = OciConfig.read(bundle);
-        DevicePolicy.requireEnforceable(config.deviceRules());
+        SystemdDevices.Program devices = null;
+        if (systemd) {
+            devices = SystemdDevices.translate(config.deviceRules());
+        } else {
+            DevicePolicy.requireEnforceable(config.deviceRules());
+        }
         Files.createDirectories(state);
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
@@ -62,7 +68,7 @@ public final class ContainerRuntime {
         int pid = Integer.parseInt(Files.readString(state.resolve("pid")).trim());
         if (systemd) {
             SystemdCgroup.Scope scope = SystemdCgroup.scope(config.cgroupsPath(), id);
-            SystemdBus.startScope(scope.unit(), scope.slice(), pid);
+            SystemdBus.startScope(scope.unit(), scope.slice(), pid, devices);
             cgroup = "/sys/fs/cgroup" + scope.filesystemPath();
             Files.writeString(state.resolve("cgroup"), cgroup);
             Files.writeString(state.resolve("systemd-unit"), scope.unit());

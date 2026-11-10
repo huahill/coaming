@@ -6,9 +6,11 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
+import io.github.huahill.coaming.oci.SystemdDevices;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 final class SystemdBus {
     private static final Linker LINKER = Linker.nativeLinker();
@@ -25,7 +27,7 @@ final class SystemdBus {
 
     private SystemdBus() {}
 
-    static void startScope(String unit, String slice, int pid) {
+    static void startScope(String unit, String slice, int pid, SystemdDevices.Program devices) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment bus = open(arena);
             MemorySegment message = method(arena, bus, "StartTransientUnit");
@@ -35,6 +37,10 @@ final class SystemdBus {
             property(arena, message, "Description", 's', arena.allocateFrom("coaming " + unit));
             property(arena, message, "Slice", 's', arena.allocateFrom(slice));
             property(arena, message, "Delegate", 'b', pointerToInt(arena, 1));
+            if (devices.policy() != null) {
+                property(arena, message, "DevicePolicy", 's', arena.allocateFrom(devices.policy()));
+                deviceAllow(arena, message, devices.allows());
+            }
             open(arena, message, 'r', "sv");
             appendString(arena, message, "PIDs");
             open(arena, message, 'v', "au");
@@ -80,6 +86,22 @@ final class SystemdBus {
         appendString(arena, message, name);
         open(arena, message, 'v', String.valueOf(type));
         appendBasic(message, type, value);
+        close(message);
+        close(message);
+    }
+
+    private static void deviceAllow(Arena arena, MemorySegment message, List<SystemdDevices.Allow> allows) {
+        open(arena, message, 'r', "sv");
+        appendString(arena, message, "DeviceAllow");
+        open(arena, message, 'v', "a(ss)");
+        open(arena, message, 'a', "(ss)");
+        for (SystemdDevices.Allow allow : allows) {
+            open(arena, message, 'r', "ss");
+            appendString(arena, message, allow.device());
+            appendString(arena, message, allow.access());
+            close(message);
+        }
+        close(message);
         close(message);
         close(message);
     }

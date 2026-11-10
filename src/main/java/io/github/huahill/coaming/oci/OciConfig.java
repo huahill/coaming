@@ -104,8 +104,10 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
                     boolean allow = item.optional("allow") != null && item.optional("allow").booleanValue();
                     String deviceType = item.optional("type") == null ? "a" : item.optional("type").string();
                     String access = item.optional("access") == null ? "rwm" : item.optional("access").string();
-                    boolean all = "a".equals(deviceType) && item.optional("major") == null && item.optional("minor") == null;
-                    deviceRules.add(new DeviceRule(allow, deviceType, access, all));
+                    Integer major = wildcard(item, "major");
+                    Integer minor = wildcard(item, "minor");
+                    boolean all = "a".equals(deviceType) && major == null && minor == null;
+                    deviceRules.add(new DeviceRule(allow, deviceType, access, all, major, minor));
                 }
             }
             if (linux.optional("seccomp") != null) {
@@ -118,6 +120,15 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
     private static int optionalInt(Json item, String name) {
         Json value = item.optional(name);
         return value == null ? 0 : (int) value.longValue();
+    }
+
+    private static Integer wildcard(Json item, String name) {
+        Json value = item.optional(name);
+        if (value == null) {
+            return null;
+        }
+        int number = (int) value.longValue();
+        return number < 0 ? null : number;
     }
 
     public Path root(Path bundle) {
