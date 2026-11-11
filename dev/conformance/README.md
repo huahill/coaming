@@ -18,44 +18,25 @@ critest --runtime-endpoint unix:///run/coaming-containerd/containerd.sock
 critest --runtime-endpoint unix:///var/run/crio/crio.sock
 ```
 
-cri-tools `critest` v1.37.0 against containerd, on the current binary:
+cri-tools `critest` v1.37.0. containerd is `coaming-containerd` at `unix:///run/coaming-containerd/containerd.sock`. cri-o is 1.37.3 at `unix:///var/run/crio/crio.sock`. k3s was stopped for both runs. Docker's containerd and dockerd were not restarted.
+
+containerd:
 
 ```
-Ran 119 of 142 Specs in 704.478 seconds
-FAIL! -- 96 Passed | 23 Failed | 0 Pending | 23 Skipped
+Ran 119 of 142 Specs in 237.641 seconds
+SUCCESS! -- 119 Passed | 0 Failed | 0 Pending | 23 Skipped
 ```
 
-`kill` no longer fails with errno 13. Exec with a tty returns. A read-only bind leaves a nested mount writable, and exec applies uid, gid, and supplemental groups.
-
-The 23 failures from that full run:
-
-- port forward, host-network port forward, and both host-port mappings
-- attach cleanup, log reopen, and the multi-container log
-- execSync timeout
-- pod sandbox metrics and multi-container pod network
-- HostPID, PodPID, and RunAsUserName
-- ReadOnlyRootfs, privileged disabled, and dropping capabilities
-- three seccomp profiles
-- deprecated permissive AppArmor profile
-- pod user namespace when an idmap mount is required
-- OOM reason stays `Error` instead of `OOMKilled`
-
-A later focused rerun, not a new full suite, passed the runtime-default and localhost seccomp profiles, HostPID, PodPID, execSync timeout, and pod sandbox metrics. Host-port mapping had already passed. These were still failing when the test machine stopped responding, so the full suite was not rerun:
-
-- port forward and host-network port forward. The host-network case can reach `127.0.0.1:12003` directly, then the sandbox is stopped and the forward dial gets connection refused.
-- port mapping with only a container port. The sandbox is stopped about a second after it starts, and the HTTP check then times out.
-- reopening the container log. The new log file stays empty.
-- a pod user namespace when an idmap mount is required. The sandbox exits with status 1 before the container starts.
-- OOM. A memory limit still does not set `memory.swap.max`, so the case was not rerun. The cgroup write is in the source and is not in the installed native image yet.
-
-cri-o `critest` v1.37.0:
+cri-o:
 
 ```
-Ran 120 of 142 Specs in 467.912 seconds
-FAIL! -- 49 Passed | 71 Failed | 0 Pending | 22 Skipped
+Ran 118 of 142 Specs in 206.723 seconds
+FAIL! -- 116 Passed | 2 Failed | 0 Pending | 24 Skipped
 ```
 
-Most cri-o failures are `CreateContainer failed as the sandbox was stopped`. A few creates return `coaming: Invalid argument`.
+The two cri-o failures are `ListMetricDescriptors` and `ListPodSandboxMetrics`. cri-o returns only `container_last_seen`. The same binary against containerd returns the cAdvisor set. Setting `included_pod_metrics = ["all"]` does not add those descriptors. That list is cri-o's CRI metrics catalog, not a cgroup file coaming can supply.
+
+cri-o's nft hostport table DNATs `127.0.0.1` to the pod and does not masquerade that source. Localhost host ports then time out. The test machine keeps `POSTROUTING -s 127.0.0.0/8 -d 10.86.0.0/16 -j MASQUERADE` in `coaming-crio-masquerade.service`. With that rule, cri-o host-port mapping passes.
 
 
 ## runtime-tools
