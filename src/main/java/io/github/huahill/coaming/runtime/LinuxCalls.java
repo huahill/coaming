@@ -568,6 +568,7 @@ final class LinuxCalls {
             }
             int error = errno();
             if (error == 1 && !hostSource.equals(path)) {
+                Files.createFile(Path.of(path));
                 check(mount(hostSource, path, null, MS_BIND, null), "bind device " + hostSource + " onto " + path);
                 return;
             }
