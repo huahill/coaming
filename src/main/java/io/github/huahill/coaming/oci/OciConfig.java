@@ -41,7 +41,7 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         if (cwdValue != null) {
             cwd = cwdValue.string();
         }
-        String hostname = "coaming";
+        String hostname = null;
         Json hostnameValue = root.optional("hostname");
         if (hostnameValue != null) {
             hostname = hostnameValue.string();

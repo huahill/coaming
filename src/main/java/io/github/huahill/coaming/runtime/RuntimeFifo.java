@@ -125,7 +125,12 @@ final class RuntimeFifo {
     }
 
     static int openExecFifo(String fifo) {
-        return open(fifo, O_WRONLY | O_CLOEXEC);
+        // Read-write so opening during create does not block until start arrives.
+        return open(fifo, O_RDWR | O_CLOEXEC);
+    }
+
+    static int openExecRead(String fifo) {
+        return open(fifo, O_CLOEXEC);
     }
 
     static void signalExecFailed(int fd) {
@@ -141,7 +146,11 @@ final class RuntimeFifo {
     }
 
     static void waitUntilExec(String fifo) {
-        int fd = open(fifo, 0);
+        int fd = openExecRead(fifo);
+        readExecResult(fd);
+    }
+
+    static void readExecResult(int fd) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment buf = arena.allocate(1);
             while (true) {

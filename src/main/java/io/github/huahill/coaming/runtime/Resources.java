@@ -20,6 +20,68 @@ final class Resources {
         return (int) weight;
     }
 
+    static boolean limitsHold(Path cgroup, Json resources) throws IOException {
+        String max = expectedMemoryMax(resources);
+        if (max != null && !max.equals(trim(cgroup.resolve("memory.max")))) {
+            return false;
+        }
+        String swap = expectedSwapMax(resources);
+        Path swapFile = cgroup.resolve("memory.swap.max");
+        return swap == null || !Files.exists(swapFile) || swap.equals(trim(swapFile));
+    }
+
+    static String expectedMemoryMax(Json resources) {
+        String unified = unifiedValue(resources, "memory.max");
+        if (unified != null) {
+            return unified;
+        }
+        Long limit = memoryLimit(resources);
+        if (limit == null) {
+            return null;
+        }
+        return limit < 0 ? "max" : Long.toString(limit);
+    }
+
+    static String expectedSwapMax(Json resources) {
+        String unified = unifiedValue(resources, "memory.swap.max");
+        if (unified != null) {
+            return unified;
+        }
+        Long limit = memoryLimit(resources);
+        if (limit == null || limit <= 0) {
+            return null;
+        }
+        Json memory = resources.optional("memory");
+        Json swap = memory.optional("swap");
+        if (swap == null) {
+            return "0";
+        }
+        if (swap.longValue() < 0) {
+            return "max";
+        }
+        return Long.toString(swap.longValue() - limit);
+    }
+
+    private static Long memoryLimit(Json resources) {
+        Json memory = resources.optional("memory");
+        if (memory == null || memory.optional("limit") == null) {
+            return null;
+        }
+        return memory.optional("limit").longValue();
+    }
+
+    private static String unifiedValue(Json resources, String key) {
+        Json unified = resources.optional("unified");
+        if (unified instanceof Json.Obj object && object.fields().containsKey(key)) {
+            return object.fields().get(key).string();
+        }
+        return null;
+    }
+
+    private static String trim(Path file) throws IOException {
+        return Files.readString(file).trim();
+    }
+
     static void apply(Path cgroup, Json resources) throws IOException {
         Json memory = resources.optional("memory");
         if (memory != null) {
@@ -43,15 +105,14 @@ final class Resources {
             if (shares != null && shares.longValue() > 0) {
                 write(cgroup.resolve("cpu.weight"), Integer.toString(weightFromShares(shares.longValue())));
             }
-            Json quota = cpu.optional("quota");
-            if (quota != null) {
-                long period = 100000;
-                Json periodValue = cpu.optional("period");
-                if (periodValue != null) {
-                    period = periodValue.longValue();
-                }
-                long value = quota.longValue();
-                String max = value < 0 ? "max " + period : value + " " + period;
+            Json quotaValue = cpu.optional("quota");
+            Json periodValue = cpu.optional("period");
+            long quota = quotaValue == null ? 0 : quotaValue.longValue();
+            long period = periodValue == null ? 0 : periodValue.longValue();
+            // cri-o writes zeros when the pod did not ask for a CPU limit. cpu.max rejects "0 0".
+            if (quota != 0 || period != 0) {
+                long effectivePeriod = period > 0 ? period : 100_000;
+                String max = quota > 0 ? quota + " " + effectivePeriod : "max " + effectivePeriod;
                 write(cgroup.resolve("cpu.max"), max);
             }
         }
@@ -92,6 +153,10 @@ final class Resources {
         if (!Files.exists(file)) {
             throw new NoSuchFileException(file.toString());
         }
-        Files.writeString(file, value);
+        try {
+            Files.writeString(file, value);
+        } catch (IOException failure) {
+            throw new IOException(file + " = " + value + ": " + failure.getMessage(), failure);
+        }
     }
 }

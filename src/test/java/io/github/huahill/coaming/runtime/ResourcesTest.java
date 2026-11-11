@@ -80,6 +80,28 @@ class ResourcesTest {
     }
 
     @Test
+    void leavesCpuAloneWhenQuotaAndPeriodAreUnset() throws Exception {
+        Files.writeString(cgroup.resolve("cpu.max"), "max 100000");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"cpu":{"quota":0,"period":0}}
+                """));
+
+        assertEquals("max 100000", Files.readString(cgroup.resolve("cpu.max")).trim());
+    }
+
+    @Test
+    void treatsANonPositiveQuotaAsUnlimited() throws Exception {
+        Files.writeString(cgroup.resolve("cpu.max"), "");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"cpu":{"quota":-1,"period":0}}
+                """));
+
+        assertEquals("max 100000", Files.readString(cgroup.resolve("cpu.max")).trim());
+    }
+
+    @Test
     void writesAPidsLimit() throws Exception {
         Files.writeString(cgroup.resolve("pids.max"), "");
 
@@ -95,6 +117,22 @@ class ResourcesTest {
         assertThrows(NoSuchFileException.class, () -> Resources.apply(cgroup, Json.parse("""
                 {"pids":{"limit":64}}
                 """)));
+    }
+
+    @Test
+    void noticesWhenSystemdResetsTheMemoryLimit() throws Exception {
+        Files.writeString(cgroup.resolve("memory.max"), "max");
+        Files.writeString(cgroup.resolve("memory.swap.max"), "max");
+        Json resources = Json.parse("""
+                {"memory":{"limit":15728640,"swap":15728640}}
+                """);
+
+        assertEquals("15728640", Resources.expectedMemoryMax(resources));
+        assertEquals("0", Resources.expectedSwapMax(resources));
+        org.junit.jupiter.api.Assertions.assertFalse(Resources.limitsHold(cgroup, resources));
+
+        Resources.apply(cgroup, resources);
+        org.junit.jupiter.api.Assertions.assertTrue(Resources.limitsHold(cgroup, resources));
     }
 
     @Test

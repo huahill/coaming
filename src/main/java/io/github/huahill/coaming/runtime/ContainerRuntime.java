@@ -17,10 +17,13 @@ import java.nio.charset.StandardCharsets;
 import io.github.huahill.coaming.oci.BindFds;
 import io.github.huahill.coaming.oci.IdMap;
 import io.github.huahill.coaming.oci.IdmapPlan;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,6 +40,13 @@ public final class ContainerRuntime {
             throw new IllegalStateException("container already exists: " + id);
         }
         OciConfig config = OciConfig.read(bundle);
+        if (config.apparmorProfile() != null) {
+            Path profiles = Path.of("/sys/kernel/security/apparmor/profiles");
+            if (!Files.isRegularFile(profiles)) {
+                throw new IllegalStateException("apparmor is not enabled");
+            }
+            ApparmorProfiles.requireLoaded(config.apparmorProfile(), Files.readString(profiles));
+        }
         SystemdDevices.Program devices = null;
         if (systemd) {
             devices = SystemdDevices.translate(config.deviceRules());
@@ -114,6 +124,8 @@ public final class ContainerRuntime {
     public static int init(Path state, Path bundle) throws Exception {
         boolean announced = false;
         int execFd = -1;
+        FileChannel errors = FileChannel.open(state.resolve("error"), StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+        note(errors, "init");
         try {
             OciConfig config = OciConfig.read(state);
             String hookId = state.getFileName().toString();
@@ -121,11 +133,13 @@ public final class ContainerRuntime {
             String hookBundle = bundle.toAbsolutePath().toString();
             recordExecutable(state);
             int startFd = RuntimeFifo.openStartFifo(state.resolve("start.fifo").toString());
+            // Hold the exec fifo before create returns. Otherwise start can observe
+            // a writer-less FIFO and treat a later exec failure as success.
+            execFd = RuntimeFifo.openExecFifo(state.resolve("exec.fifo").toString());
             Files.writeString(state.resolve("status"), "created");
             RuntimeFifo.signal(state.resolve("created.fifo").toString());
             announced = true;
             RuntimeFifo.readStartByte(startFd);
-            execFd = RuntimeFifo.openExecFifo(state.resolve("exec.fifo").toString());
             Path rootfs = config.root(bundle).toAbsolutePath();
             boolean newMount = createsNamespace(config, "mount");
             if (newMount) {
@@ -181,8 +195,9 @@ public final class ContainerRuntime {
                     LinuxCalls.readonlyRoot();
                 }
             }
-            if (createsNamespace(config, "uts")) {
-                LinuxCalls.hostname(config.hostname());
+            String hostname = hostnameToSet(config);
+            if (hostname != null) {
+                LinuxCalls.hostname(hostname);
             }
             if (!"/".equals(config.cwd())) {
                 LinuxCalls.chdir(config.cwd());
@@ -210,6 +225,7 @@ public final class ContainerRuntime {
                 LinuxCalls.installSeccomp(config.seccomp());
             }
             runHooks(config, "startContainer", hookState(config, hookId, "running", hookPid, hookBundle));
+            note(errors, "exec");
             try {
                 LinuxCalls.exec(args, config.env().toArray(String[]::new));
             } catch (RuntimeException failure) {
@@ -217,6 +233,7 @@ public final class ContainerRuntime {
             }
             return 1;
         } catch (Exception failure) {
+            note(errors, failure.toString());
             if (execFd >= 0) {
                 RuntimeFifo.signalExecFailed(execFd);
             }
@@ -224,6 +241,14 @@ public final class ContainerRuntime {
                 announceFailure(state);
             }
             throw failure;
+        }
+    }
+
+    private static void note(FileChannel errors, String message) {
+        try {
+            errors.write(ByteBuffer.wrap((message + "\n").getBytes(StandardCharsets.UTF_8)));
+        } catch (IOException ignored) {
+            // The container error is reported by the caller.
         }
     }
 
@@ -274,15 +299,40 @@ public final class ContainerRuntime {
     }
 
     private static boolean createsNamespace(OciConfig config, String type) {
+        return namespace(config, type, true);
+    }
+
+    private static boolean hasNamespace(OciConfig config, String type) {
+        return namespace(config, type, false);
+    }
+
+    private static boolean namespace(OciConfig config, String type, boolean createdOnly) {
         if (!config.namespacesSpecified()) {
             return false;
         }
         for (io.github.huahill.coaming.oci.Namespace namespace : config.namespaces()) {
-            if (type.equals(namespace.type()) && (namespace.path() == null || namespace.path().isBlank())) {
+            if (!type.equals(namespace.type())) {
+                continue;
+            }
+            boolean created = namespace.path() == null || namespace.path().isBlank();
+            if (!createdOnly || created) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static String hostnameToSet(OciConfig config) throws IOException {
+        String configured = config.hostname();
+        if ((configured == null || configured.isBlank()) && createsNamespace(config, "uts")) {
+            configured = "coaming";
+        }
+        String current = "";
+        Path self = Path.of("/proc/self/ns/uts");
+        if (Files.exists(self)) {
+            current = Files.readSymbolicLink(self).toString();
+        }
+        return UtsHostname.nameToSet(configured, hasNamespace(config, "uts"), System.getenv("COAMING_HOST_UTS"), current);
     }
 
     private static void applyResources(Path cgroup, io.github.huahill.coaming.json.Json resources) throws Exception {
@@ -290,13 +340,18 @@ public final class ContainerRuntime {
         for (int attempt = 0; attempt < 50; attempt++) {
             try {
                 Resources.apply(cgroup, resources);
-                return;
+                if (Resources.limitsHold(cgroup, resources)) {
+                    return;
+                }
             } catch (NoSuchFileException failure) {
                 missing = failure;
-                Thread.sleep(20);
             }
+            Thread.sleep(20);
         }
-        throw missing;
+        if (missing != null) {
+            throw missing;
+        }
+        throw new IllegalStateException("cgroup limit did not hold");
     }
 
     private static boolean createsUserNamespace(OciConfig config) {
@@ -405,11 +460,66 @@ public final class ContainerRuntime {
         return helper.waitFor();
     }
 
-    public static int start(Path root, String id) throws IOException {
+    private static String containerError(Path error) {
+        if (!Files.isRegularFile(error)) {
+            return "";
+        }
+        try {
+            String last = "";
+            for (String line : Files.readString(error).split("\\R")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || "init".equals(trimmed) || "exec".equals(trimmed)) {
+                    continue;
+                }
+                last = trimmed;
+            }
+            return last;
+        } catch (IOException failure) {
+            return "";
+        }
+    }
+
+    public static int start(Path root, String id) throws Exception {
         requireLinux();
         Path state = requireContainer(root, id);
+        // The read end has to be open before the payload is released. Otherwise a
+        // fast exec failure closes the only fifo descriptor and the error byte is lost.
+        int execRead = RuntimeFifo.openExecRead(state.resolve("exec.fifo").toString());
         RuntimeFifo.signal(state.resolve("start.fifo").toString());
-        RuntimeFifo.waitUntilExec(state.resolve("exec.fifo").toString());
+        try {
+            RuntimeFifo.readExecResult(execRead);
+        } catch (IllegalStateException failure) {
+            String detail = containerError(state.resolve("error"));
+            if (detail.isBlank()) {
+                throw failure;
+            }
+            throw new IllegalStateException(detail, failure);
+        }
+        String detail = containerError(state.resolve("error"));
+        if (!detail.isBlank()) {
+            throw new IllegalStateException(detail);
+        }
+        // systemd finishes the scope after create returns and resets memory.max.
+        // Apply the limit again once the payload is running.
+        if (Files.exists(state.resolve("cgroup")) && Files.exists(state.resolve("config.json"))) {
+            // A one-shot command can exit before systemd finishes the scope. The limit was
+            // already applied at create, and the cgroup file disappears with the process.
+            if (processRunning(state)) {
+                Path cgroup = Path.of(Files.readString(state.resolve("cgroup")).trim());
+                if (Files.isDirectory(cgroup)) {
+                    OciConfig config = OciConfig.read(state);
+                    if (config.resources() != null) {
+                        try {
+                            applyResources(cgroup, config.resources());
+                        } catch (NoSuchFileException failure) {
+                            if (processRunning(state)) {
+                                throw failure;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Files.writeString(state.resolve("status"), "running");
         String bundle = text(state.resolve("bundle"));
         if (Files.exists(state.resolve("config.json"))) {
@@ -598,6 +708,24 @@ public final class ContainerRuntime {
             return true;
         }
         return Files.exists(Path.of("/proc").resolve(Integer.toString(pid)));
+    }
+
+    private static boolean processRunning(Path state) throws IOException {
+        if (!processAlive(state) || !Files.exists(state.resolve("pid"))) {
+            return false;
+        }
+        int pid = Integer.parseInt(Files.readString(state.resolve("pid")).trim());
+        Path stat = Path.of("/proc").resolve(Integer.toString(pid)).resolve("stat");
+        if (!Files.isRegularFile(stat)) {
+            return false;
+        }
+        String text = Files.readString(stat);
+        int end = text.lastIndexOf(')');
+        if (end < 0 || end + 2 >= text.length()) {
+            return false;
+        }
+        char mark = text.charAt(end + 2);
+        return mark != 'Z' && mark != 'X';
     }
 
     private static String statsLine(String id) {

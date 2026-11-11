@@ -110,7 +110,11 @@ final class LinuxCalls {
         }
         String source = Files.exists(Path.of("/dev/null")) ? "/dev/null" : emptyMask();
         check(mount(source, path, null, MS_BIND, null), "mask " + path);
-        check(mount(source, path, null, MS_BIND | MS_REMOUNT | RDONLY, null), "mask readonly " + path);
+        // A user namespace can refuse the read-only remount. The /dev/null bind already hides the file.
+        int remount = mount(source, path, null, MS_BIND | MS_REMOUNT | RDONLY, null);
+        if (remount != 0 && errno() != 1) {
+            throw new IllegalStateException("mask readonly " + path + " failed: " + errno());
+        }
     }
 
     private static String emptyMask() {
@@ -516,7 +520,7 @@ final class LinuxCalls {
                         System.err.println("coaming: seccomp skip " + name);
                         continue;
                     }
-                    addSeccompRules(context, arena, syscall.action(), number, syscall.args());
+                    addSeccompRules(context, arena, name, syscall.action(), number, syscall.args());
                 }
             }
             int attr;
@@ -539,19 +543,19 @@ final class LinuxCalls {
         }
     }
 
-    private static void addSeccompRules(MemorySegment context, Arena arena, int action, int number,
+    private static void addSeccompRules(MemorySegment context, Arena arena, String name, int action, int number,
             List<io.github.huahill.coaming.oci.SeccompProfile.Argument> args) {
         boolean sameIndex = !args.isEmpty() && args.stream().map(io.github.huahill.coaming.oci.SeccompProfile.Argument::index).distinct().count() == 1;
         if (args.size() > 1 && sameIndex) {
             for (var argument : args) {
-                addSeccompRule(context, arena, action, number, List.of(argument));
+                addSeccompRule(context, arena, name, action, number, List.of(argument));
             }
             return;
         }
-        addSeccompRule(context, arena, action, number, args);
+        addSeccompRule(context, arena, name, action, number, args);
     }
 
-    private static void addSeccompRule(MemorySegment context, Arena arena, int action, int number,
+    private static void addSeccompRule(MemorySegment context, Arena arena, String name, int action, int number,
             List<io.github.huahill.coaming.oci.SeccompProfile.Argument> args) {
         MemorySegment arguments = MemorySegment.NULL;
         if (!args.isEmpty()) {
@@ -572,7 +576,7 @@ final class LinuxCalls {
             throw new IllegalStateException("seccomp rule failed", failure);
         }
         if (SeccompDecision.decide(number, rc) == SeccompDecision.Result.FAIL) {
-            throw new IllegalStateException("seccomp rule failed: " + rc);
+            throw new IllegalStateException("seccomp rule failed: " + name + " " + rc);
         }
     }
 

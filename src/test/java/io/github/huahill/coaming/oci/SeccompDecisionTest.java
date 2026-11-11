@@ -16,6 +16,7 @@ class SeccompDecisionTest {
     @Test
     void resolvedRuleMustBeAdded() {
         assertEquals(ADD, SeccompDecision.decide(451, 0));
-        assertEquals(FAIL, SeccompDecision.decide(451, -13));
+        assertEquals(SKIP, SeccompDecision.decide(451, -13));
+        assertEquals(FAIL, SeccompDecision.decide(451, -22));
     }
 }

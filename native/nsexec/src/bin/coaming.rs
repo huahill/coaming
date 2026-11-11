@@ -31,7 +31,7 @@ mod linux {
         if invocation.command == "init" || invocation.command == "exec-init" {
             fail("namespace bootstrap did not run");
         }
-        if invocation.command == "start" && invocation.rest.len() == 1 && !has_poststart(&invocation.root, &invocation.rest[0]) {
+        if invocation.command == "start" && invocation.rest.len() == 1 && !has_poststart(&invocation.root, &invocation.rest[0]) && !has_cgroup(&invocation.root, &invocation.rest[0]) {
             start(&invocation);
         }
         if invocation.command == "exec" {
@@ -59,8 +59,9 @@ mod linux {
         if !state.is_dir() {
             fail(&format!("container not found: {id}"));
         }
+        let exec = open(&state.join("exec.fifo"), libc::O_RDONLY | libc::O_CLOEXEC);
         signal(&state.join("start.fifo"));
-        wait_exec(&state.join("exec.fifo"));
+        wait_exec_fd(exec);
         if let Err(error) = std::fs::write(state.join("status"), "running") {
             fail(&format!("writing status failed: {error}"));
         }
@@ -77,8 +78,7 @@ mod linux {
         unsafe { libc::close(fd) };
     }
 
-    fn wait_exec(path: &Path) {
-        let fd = open(path, libc::O_RDONLY);
+    fn wait_exec_fd(fd: i32) {
         let mut byte = [0u8];
         loop {
             let read = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
@@ -282,6 +282,10 @@ mod linux {
         } else {
             false
         }
+    }
+
+    fn has_cgroup(root: &Path, id: &str) -> bool {
+        container_dir(root, id).join("cgroup").is_file()
     }
 
     fn has_poststart(root: &Path, id: &str) -> bool {

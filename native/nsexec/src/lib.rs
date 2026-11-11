@@ -98,6 +98,9 @@ fn enter_container() {
         unsafe { libc::_exit(75) };
     }
     let parts = cmdline_parts();
+    if let Ok(namespace) = std::fs::read_link("/proc/self/ns/uts") {
+        set_env("COAMING_HOST_UTS", &namespace.to_string_lossy());
+    }
     let (mut unshare, mut joins) = namespace_actions(&parts);
     let uid_map = argument_value("--uid-map").unwrap_or_default();
     let gid_map = argument_value("--gid-map").unwrap_or_default();
@@ -1187,6 +1190,10 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
             for group in groups {
                 let pointer = if group.is_empty() { std::ptr::null() } else { group.as_ptr() };
                 let rc = (api.add)(context, *action, number, group.len() as u32, pointer);
+                if rc == -13 {
+                    // Same refusal as the Java loader: the rule only repeats the default action.
+                    continue;
+                }
                 if rc != 0 {
                     seccomp_note(api.log, &format!("add {name} number={number} args={} rc={rc}", group.len()));
                     (api.release)(context);
