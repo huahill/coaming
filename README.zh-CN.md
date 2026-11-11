@@ -40,8 +40,8 @@ containerd 把 `BinaryName` 指到这个二进制，shim 仍是 `containerd-shim
 
 | 运行时 | 第 1 次 | 第 2 次 | 第 3 次 |
 | --- | --- | --- | --- |
-| coaming 0.1.0 | 23 ms，1308 KiB | 24 ms，1308 KiB | 20 ms，1308 KiB |
-| runc 1.4.2 | 28 ms，1300 KiB | 24 ms，1300 KiB | 27 ms，1304 KiB |
+| coaming 0.1.0 | 23 ms，2348 KiB | 32 ms，2344 KiB | 18 ms，2468 KiB |
+| runc 1.4.2 | 23 ms，2332 KiB | 21 ms，2296 KiB | 18 ms，2324 KiB |
 
 
 ## 安装
