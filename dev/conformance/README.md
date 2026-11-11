@@ -40,7 +40,15 @@ The 23 failures:
 - pod user namespace when an idmap mount is required
 - OOM reason stays `Error` instead of `OOMKilled`
 
-cri-o `critest` has not been run.
+cri-o `critest` v1.37.0:
+
+```
+Ran 120 of 142 Specs in 467.912 seconds
+FAIL! -- 49 Passed | 71 Failed | 0 Pending | 22 Skipped
+```
+
+Most cri-o failures are `CreateContainer failed as the sandbox was stopped`. A few creates return `coaming: Invalid argument`.
+
 
 ## runtime-tools
 
