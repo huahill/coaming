@@ -27,14 +27,14 @@ Ran 119 of 142 Specs in 237.641 seconds
 SUCCESS! -- 119 Passed | 0 Failed | 0 Pending | 23 Skipped
 ```
 
-cri-o:
+cri-o, after `[crio.stats] included_pod_metrics = ["all"]`:
 
 ```
 Ran 118 of 142 Specs in 206.723 seconds
 FAIL! -- 116 Passed | 2 Failed | 0 Pending | 24 Skipped
 ```
 
-The two cri-o failures are `ListMetricDescriptors` and `ListPodSandboxMetrics`. cri-o returns only `container_last_seen`. The same binary against containerd returns the cAdvisor set. Setting `included_pod_metrics = ["all"]` does not add those descriptors. That list is cri-o's CRI metrics catalog, not a cgroup file coaming can supply.
+Those two failures were `ListMetricDescriptors` and `ListPodSandboxMetrics`. The setting had been placed under `[crio.metrics]`, which cri-o ignores, so the catalog stayed at `container_last_seen`. It belongs under `[crio.stats]`. After moving it, the same two cases passed: `Ran 2 of 142 Specs in 0.550 seconds`, `2 Passed | 0 Failed`. The full suite was not rerun after that config change.
 
 cri-o's nft hostport table DNATs `127.0.0.1` to the pod and does not masquerade that source. Localhost host ports then time out. The test machine keeps `POSTROUTING -s 127.0.0.0/8 -d 10.86.0.0/16 -j MASQUERADE` in `coaming-crio-masquerade.service`. With that rule, cri-o host-port mapping passes.
 
