@@ -46,6 +46,8 @@ containerd 把 `BinaryName` 指到这个二进制，shim 仍是 `containerd-shim
 
 ## 安装
 
+`v` 标签对应的 GitHub Release 安装包由 GitHub Actions 构建，不是在开发者机器上构建的。
+
 `dev/package.sh` 把启动器和原生镜像打成 `coaming-<version>-linux-amd64.tar.gz`。版本号来自 `Coaming.VERSION`。`coaming` 是小启动器，`coaming-runtime` 是原生镜像，两个文件放在同一目录。
 
 containerd 把 `BinaryName` 指到解压出的 `coaming`，然后重启那个 containerd。shim 仍是 `containerd-shim-runc-v2`。cri-o 把 `runtime_path` 指到同一个二进制，然后重启 crio。

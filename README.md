@@ -46,6 +46,8 @@ Three samples on one cgroup v2 machine. The bundle is the same for both. The clo
 
 ## Install
 
+The GitHub Release asset for a `v` tag is built by GitHub Actions, not on a developer machine.
+
 `dev/package.sh` packs the launcher and the native image into `coaming-<version>-linux-amd64.tar.gz`. The version is `Coaming.VERSION`. `coaming` is the small launcher. `coaming-runtime` is the native image, and the two files stay in the same directory.
 
 Point containerd's `BinaryName` at the unpacked `coaming` and restart that containerd. The shim stays `containerd-shim-runc-v2`. Point cri-o's `runtime_path` at the same binary and restart crio.

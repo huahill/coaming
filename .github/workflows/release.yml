@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag against Coaming.VERSION
+        run: |
+          version=$(sed -n 's/.*static final String VERSION = "\([^"]*\)".*/\1/p' src/main/java/io/github/huahill/coaming/Coaming.java)
+          tag=${GITHUB_REF_NAME#v}
+          if [ -z "$version" ] || [ "$tag" != "$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Coaming.VERSION ${version}" >&2
+            exit 1
+          fi
+
+      - name: Install GraalVM Community 25.0.4.1
+        run: |
+          # setup-java only accepts graalvm-community-jdk-<digits>. java-version 25
+          # therefore installs 25.0.2 and skips the 25i3 build used for conformance.
+          url=https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.3.4.1/graalvm-community-jdk-25i3-25.0.4.1_linux-x64_bin.tar.gz
+          curl -fsSL -o /tmp/graal.tar.gz -L "$url"
+          curl -fsSL -o /tmp/graal.sha256 -L "$url.sha256"
+          echo "$(cat /tmp/graal.sha256)  /tmp/graal.tar.gz" | sha256sum -c -
+          sudo mkdir -p /opt/graalvm
+          sudo tar -C /opt/graalvm --strip-components=1 -xzf /tmp/graal.tar.gz
+          test -x /opt/graalvm/bin/native-image
+          echo "JAVA_HOME=/opt/graalvm" >> "$GITHUB_ENV"
+          echo "/opt/graalvm/bin" >> "$GITHUB_PATH"
+          /opt/graalvm/bin/java -version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build packages
+        run: sudo apt-get update && sudo apt-get install -y build-essential libseccomp-dev
+
+      - name: Install Maven 4.0.0-rc-5
+        run: |
+          curl -fsSL -o /tmp/maven.tgz https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/4.0.0-rc-5/apache-maven-4.0.0-rc-5-bin.tar.gz
+          sudo tar -C /opt -xzf /tmp/maven.tgz
+          echo "/opt/apache-maven-4.0.0-rc-5/bin" >> "$GITHUB_PATH"
+          /opt/apache-maven-4.0.0-rc-5/bin/mvn -version
+
+      - name: Build the native image
+        run: mvn -B -Pnative -DskipTests package
+
+      - name: Pack and publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(sed -n 's/.*static final String VERSION = "\([^"]*\)".*/\1/p' src/main/java/io/github/huahill/coaming/Coaming.java)
+          archive=$(sh dev/package.sh)
+          case "$archive" in
+            *"/coaming-${version}-linux-amd64.tar.gz") ;;
+            *) echo "unexpected archive: $archive" >&2; exit 1 ;;
+          esac
+          cat > release-notes.md <<'EOF'
+          Linux amd64, built by GitHub Actions from this tag.
+
+          The archive contains `coaming` and `coaming-runtime`. Keep them in the same directory. Point containerd `BinaryName` or cri-o `runtime_path` at `coaming`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
+
+          cgroup v2 only. A non-empty `process.selinuxLabel` is rejected.
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --title "coaming ${version}" \
+            --notes-file release-notes.md \
+            "$archive"
