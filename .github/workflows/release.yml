@@ -43,18 +43,11 @@ jobs:
 
       - name: Install native build packages
         run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/apt-mirrors.txt
-          fi
-          ok=0
-          for _ in 1 2 3; do
-            if sudo apt-get update && sudo apt-get install -y build-essential libseccomp-dev; then
-              ok=1
-              break
-            fi
-            sleep 15
-          done
-          test "$ok" = 1
+          command -v cc >/dev/null
+          base=http://archive.ubuntu.com/ubuntu/pool/main/libs/libseccomp
+          curl -fsSL -o /tmp/libseccomp2.deb "$base/libseccomp2_2.5.5-1ubuntu3.1_amd64.deb"
+          curl -fsSL -o /tmp/libseccomp-dev.deb "$base/libseccomp-dev_2.5.5-1ubuntu3.1_amd64.deb"
+          sudo dpkg -i /tmp/libseccomp2.deb /tmp/libseccomp-dev.deb
 
       - name: Install Maven 4.0.0-rc-5
         run: |
