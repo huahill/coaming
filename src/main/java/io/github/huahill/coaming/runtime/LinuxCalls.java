@@ -91,6 +91,7 @@ final class LinuxCalls {
     private static final int O_RDONLY = 0;
     private static final int O_WRONLY = 1;
     private static final int O_RDWR = 2;
+    private static final int O_CLOEXEC = 524288;
 
     private LinuxCalls() {}
 
@@ -271,6 +272,50 @@ final class LinuxCalls {
             }
         } catch (Throwable failure) {
             throw new IllegalStateException("writing start fifo failed", failure);
+        } finally {
+            close(fd);
+        }
+    }
+
+    static int openExecFifo(String fifo) {
+        return open(fifo, O_WRONLY | O_CLOEXEC);
+    }
+
+    static void signalExecFailed(int fd) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment buf = arena.allocate(1);
+            buf.set(ValueLayout.JAVA_BYTE, 0, (byte) 'E');
+            WRITE.invokeExact(fd, buf, 1L);
+        } catch (Throwable ignored) {
+            // The original exec error is the one that matters.
+        } finally {
+            close(fd);
+        }
+    }
+
+    static void waitUntilExec(String fifo) {
+        int fd = open(fifo, O_RDONLY);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment buf = arena.allocate(1);
+            while (true) {
+                long rc = (long) READ.invokeExact(fd, buf, 1L);
+                if (rc == 0) {
+                    return;
+                }
+                if (rc > 0) {
+                    if (buf.get(ValueLayout.JAVA_BYTE, 0) == (byte) 'E') {
+                        throw new IllegalStateException("container exec failed");
+                    }
+                    continue;
+                }
+                if (errno() != 4) {
+                    throw new IllegalStateException("reading exec fifo failed: " + errno());
+                }
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("waiting for exec failed", failure);
         } finally {
             close(fd);
         }

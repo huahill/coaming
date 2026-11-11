@@ -36,6 +36,35 @@ class OciConfigTest {
         assertFalse(config.namespacesSpecified() && config.namespaces().isEmpty());
         assertTrue(config.namespacesSpecified());
         assertEquals(List.of(), config.env());
+        assertTrue(config.hooks().isEmpty());
+    }
+
+    @Test
+    void readsSixOciHooks() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "hooks": {
+                    "prestart": [{"path": "/hooks/prestart"}],
+                    "createRuntime": [{"path": "/hooks/createRuntime", "args": ["/hooks/createRuntime", "a"], "env": ["A=1"], "timeout": 3}],
+                    "createContainer": [{"path": "/hooks/createContainer"}],
+                    "startContainer": [{"path": "/hooks/startContainer"}],
+                    "poststart": [{"path": "/hooks/poststart"}],
+                    "poststop": [{"path": "/hooks/poststop"}]
+                  }
+                }
+                """);
+        OciConfig config = OciConfig.read(bundle);
+        assertEquals("/hooks/prestart", config.hooks().get("prestart").getFirst().path());
+        assertEquals("/hooks/createRuntime", config.hooks().get("createRuntime").getFirst().path());
+        assertEquals(List.of("/hooks/createRuntime", "a"), config.hooks().get("createRuntime").getFirst().args());
+        assertEquals(List.of("A=1"), config.hooks().get("createRuntime").getFirst().env());
+        assertEquals(3, config.hooks().get("createRuntime").getFirst().timeout());
+        assertEquals("/hooks/createContainer", config.hooks().get("createContainer").getFirst().path());
+        assertEquals("/hooks/startContainer", config.hooks().get("startContainer").getFirst().path());
+        assertEquals("/hooks/poststart", config.hooks().get("poststart").getFirst().path());
+        assertEquals("/hooks/poststop", config.hooks().get("poststop").getFirst().path());
     }
 
     @Test

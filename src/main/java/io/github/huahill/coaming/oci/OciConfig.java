@@ -5,9 +5,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -119,7 +122,43 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         boolean noNewPrivileges = process.optional("noNewPrivileges") != null && process.optional("noNewPrivileges").booleanValue();
         Integer oomScoreAdj = process.optional("oomScoreAdj") == null ? null : (int) process.optional("oomScoreAdj").longValue();
         Json resources = linux == null ? null : linux.optional("resources");
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"));
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root));
+    }
+
+
+    private static final Set<String> HOOK_NAMES = Set.of(
+            "prestart", "createRuntime", "createContainer", "startContainer", "poststart", "poststop");
+
+    private static Map<String, List<OciHook>> readHooks(Json root) {
+        Json value = root.optional("hooks");
+        if (!(value instanceof Json.Obj obj)) {
+            return Map.of();
+        }
+        Map<String, List<OciHook>> hooks = new LinkedHashMap<>();
+        for (Map.Entry<String, Json> entry : obj.fields().entrySet()) {
+            if (!HOOK_NAMES.contains(entry.getKey())) {
+                throw new IllegalArgumentException("unsupported hook " + entry.getKey());
+            }
+            if (!(entry.getValue() instanceof Json.Arr arr)) {
+                throw new IllegalArgumentException("hook " + entry.getKey() + " must be an array");
+            }
+            List<OciHook> list = new ArrayList<>();
+            for (Json item : arr.items()) {
+                List<String> args = item.optional("args") == null ? List.of() : item.optional("args").strings();
+                List<String> env = item.optional("env") == null ? List.of() : item.optional("env").strings();
+                Integer timeout = null;
+                Json timeoutValue = item.optional("timeout");
+                if (timeoutValue != null) {
+                    timeout = (int) timeoutValue.longValue();
+                    if (timeout <= 0) {
+                        throw new IllegalArgumentException("hook timeout must be positive");
+                    }
+                }
+                list.add(new OciHook(item.field("path").string(), args, env, timeout));
+            }
+            hooks.put(entry.getKey(), List.copyOf(list));
+        }
+        return Map.copyOf(hooks);
     }
 
     private static String apparmorProfile(Json process) {
