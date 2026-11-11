@@ -559,9 +559,17 @@ final class LinuxCalls {
         long dev = ((major & 0xfff) << 8) | ((major & 0xfffff000L) << 32) | (minor & 0xff) | ((minor & 0xffffff00L) << 12);
         try (Arena arena = Arena.ofConfined()) {
             int rc = (int) MKNOD.invokeExact(arena.allocateFrom(path), kind | (fileMode & 07777), dev);
-            if (rc != 0 && errno() != 17) {
-                throw new IllegalStateException("mknod " + path + " failed: " + errno());
+            if (rc == 0 || errno() == 17) {
+                return;
             }
+            if (errno() == 1) {
+                String host = "/oldroot" + path;
+                if (Files.exists(Path.of(host))) {
+                    check(mount(host, path, null, MS_BIND, null), "bind device " + path);
+                    return;
+                }
+            }
+            throw new IllegalStateException("mknod " + path + " failed: " + errno());
         } catch (RuntimeException failure) {
             throw failure;
         } catch (Throwable failure) {

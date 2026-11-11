@@ -137,12 +137,12 @@ public final class ContainerRuntime {
         if (config.rootfsPropagation() != null) {
             LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
         }
+        for (DeviceNode device : config.devices()) {
+            LinuxCalls.createDevice(device.path(), device.type(), device.major(), device.minor(), device.fileMode());
+        }
         LinuxCalls.umountDetach("/oldroot");
         if (!mountsProc) {
             LinuxCalls.mountProc("/proc");
-        }
-        for (DeviceNode device : config.devices()) {
-            LinuxCalls.createDevice(device.path(), device.type(), device.major(), device.minor(), device.fileMode());
         }
         defaultDeviceSymlinks();
         for (String masked : config.maskedPaths()) {
