@@ -19,6 +19,7 @@ critest --runtime-endpoint unix:///var/run/crio/crio.sock
 ```
 
 cri-tools `critest` v1.37.0 has not been run.
+A later attempt against `unix:///run/coaming-containerd/containerd.sock` stopped on image pulls: `registry.k8s.io` and `gcr.io` timed out from this machine.
 
 ## runtime-tools
 
