@@ -27,7 +27,7 @@ FAIL! -- 96 Passed | 23 Failed | 0 Pending | 23 Skipped
 
 `kill` no longer fails with errno 13. Exec with a tty returns. A read-only bind leaves a nested mount writable, and exec applies uid, gid, and supplemental groups.
 
-The 23 failures:
+The 23 failures from that full run:
 
 - port forward, host-network port forward, and both host-port mappings
 - attach cleanup, log reopen, and the multi-container log
@@ -39,6 +39,14 @@ The 23 failures:
 - deprecated permissive AppArmor profile
 - pod user namespace when an idmap mount is required
 - OOM reason stays `Error` instead of `OOMKilled`
+
+A later focused rerun, not a new full suite, passed the runtime-default and localhost seccomp profiles, HostPID, PodPID, execSync timeout, and pod sandbox metrics. Host-port mapping had already passed. These were still failing when the test machine stopped responding, so the full suite was not rerun:
+
+- port forward and host-network port forward. The host-network case can reach `127.0.0.1:12003` directly, then the sandbox is stopped and the forward dial gets connection refused.
+- port mapping with only a container port. The sandbox is stopped about a second after it starts, and the HTTP check then times out.
+- reopening the container log. The new log file stays empty.
+- a pod user namespace when an idmap mount is required. The sandbox exits with status 1 before the container starts.
+- OOM. A memory limit still does not set `memory.swap.max`, so the case was not rerun. The cgroup write is in the source and is not in the installed native image yet.
 
 cri-o `critest` v1.37.0:
 
