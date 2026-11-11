@@ -7,6 +7,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import io.github.huahill.coaming.oci.LinuxCapabilities;
+import io.github.huahill.coaming.oci.SeccompDecision;
 import io.github.huahill.coaming.oci.ProcessUser;
 import io.github.huahill.coaming.oci.Rlimit;
 import java.util.List;
@@ -546,7 +547,9 @@ final class LinuxCalls {
                     } catch (Throwable failure) {
                         throw new IllegalStateException("seccomp resolve failed", failure);
                     }
-                    if (number < 0) {
+                    SeccompDecision.Result decision = SeccompDecision.decide(number, 0);
+                    if (decision == SeccompDecision.Result.SKIP) {
+                        System.err.println("coaming: seccomp skip " + name);
                         continue;
                     }
                     int rc;
@@ -555,12 +558,8 @@ final class LinuxCalls {
                     } catch (Throwable failure) {
                         throw new IllegalStateException("seccomp rule failed", failure);
                     }
-                    if (rc != 0) {
-                        // libseccomp cannot express every name in a multi-arch profile.
-                        // A default-deny profile still blocks the syscall when the rule is skipped.
-                        if (io.github.huahill.coaming.oci.SeccompProfile.ignoreAddResult(rc)) {
-                            continue;
-                        }
+                    decision = SeccompDecision.decide(number, rc);
+                    if (decision == SeccompDecision.Result.FAIL) {
                         throw new IllegalStateException("seccomp rule " + name + " failed: " + rc);
                     }
                 }

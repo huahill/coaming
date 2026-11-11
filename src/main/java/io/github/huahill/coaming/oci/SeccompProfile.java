@@ -9,10 +9,6 @@ public record SeccompProfile(int defaultAction, List<String> architectures, List
 
     public record Argument(int index, int operation, long value, long valueTwo) {}
 
-    public static boolean ignoreAddResult(int rc) {
-        return rc == -13 || rc == -14 || rc == -22 || rc == -38;
-    }
-
     public static int action(String name, Integer errno) {
         return switch (name) {
             case "SCMP_ACT_ALLOW" -> 0x7fff0000;
