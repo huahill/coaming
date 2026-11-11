@@ -162,6 +162,10 @@ mod linux {
                 command.arg(profile);
             }
         }
+        if let Some(user) = super::json_user(&spec) {
+            command.arg("--user");
+            command.arg(user);
+        }
         command.arg("--");
         command.args(args);
         let error = command.exec();
@@ -399,6 +403,38 @@ mod linux {
 }
 
 
+
+fn json_user(spec: &str) -> Option<String> {
+    let object = top_level_value(spec, "user")?.trim().to_string();
+    if object == "null" || !object.starts_with('{') {
+        return None;
+    }
+    let uid = json_number(&object, "uid").unwrap_or(0);
+    let gid = json_number(&object, "gid").unwrap_or(0);
+    let groups = json_number_array(&object, "additionalGids");
+    let extra = groups.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(",");
+    Some(format!("{uid}:{gid}:{extra}"))
+}
+
+fn json_number(json: &str, key: &str) -> Option<i64> {
+    let raw = top_level_value(json, key)?.trim().trim_end_matches(',').to_string();
+    raw.parse().ok()
+}
+
+fn json_number_array(json: &str, key: &str) -> Vec<i64> {
+    let Some(raw) = top_level_value(json, key) else {
+        return Vec::new();
+    };
+    let raw = raw.trim();
+    if !raw.starts_with('[') {
+        return Vec::new();
+    }
+    raw.trim_matches(|ch| ch == '[' || ch == ']')
+        .split(',')
+        .filter_map(|item| item.trim().parse().ok())
+        .collect()
+}
+
 fn json_string(json: &str, key: &str) -> Option<String> {
     let raw = top_level_value(json, key)?;
     let raw = raw.trim();
@@ -595,7 +631,7 @@ fn signal_number(signal: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod signal_tests {
-    use super::{json_string, json_string_array, signal_number};
+    use super::{json_string, json_string_array, json_user, signal_number};
 
     #[test]
     fn named_and_numeric_signals_match_the_runtime() {
@@ -612,5 +648,16 @@ mod signal_tests {
         assert_eq!(json_string_array(spec, "args"), vec!["/bin/echo", "hi"]);
         assert_eq!(json_string(spec, "cwd").as_deref(), Some("/tmp"));
         assert_eq!(json_string_array(spec, "env"), vec!["PATH=/bin"]);
+    }
+
+    #[test]
+    fn exec_user_keeps_supplemental_groups() {
+        let spec = r#"{"args":["id"],"user":{"uid":1001,"gid":1001,"additionalGids":[10,1234]}}"#;
+        assert_eq!(json_user(spec).as_deref(), Some("1001:1001:10,1234"));
+        let script = r#"{"args":["sh","-c","while [ ! -f /var/run/nginx.pid ]; do sleep 1; done"]}"#;
+        assert_eq!(
+            json_string_array(script, "args"),
+            vec!["sh", "-c", "while [ ! -f /var/run/nginx.pid ]; do sleep 1; done"]
+        );
     }
 }

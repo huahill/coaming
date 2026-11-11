@@ -8,6 +8,7 @@ pub struct PreparedBind {
     pub recursive: bool,
     pub attr_set: u64,
     pub propagation: u64,
+    pub recursive_readonly: bool,
 }
 
 const MOUNT_ATTR_RDONLY: u64 = 0x1;
@@ -54,11 +55,20 @@ fn prepare_bind(destination: String, source: String, mut recursive: bool, option
     let mut attr_set = 0u64;
     let mut propagation = 0u64;
     let mut saw_propagation = false;
+    let mut recursive_readonly = false;
     for option in options {
         match option.as_str() {
             "rbind" => recursive = true,
             "ro" => attr_set |= MOUNT_ATTR_RDONLY,
-            "rw" => attr_set &= !MOUNT_ATTR_RDONLY,
+            "rro" => {
+                attr_set |= MOUNT_ATTR_RDONLY;
+                recursive = true;
+                recursive_readonly = true;
+            }
+            "rw" => {
+                attr_set &= !MOUNT_ATTR_RDONLY;
+                recursive_readonly = false;
+            }
             "nosuid" => attr_set |= MOUNT_ATTR_NOSUID,
             "nodev" => attr_set |= MOUNT_ATTR_NODEV,
             "noexec" => attr_set |= MOUNT_ATTR_NOEXEC,
@@ -109,6 +119,7 @@ fn prepare_bind(destination: String, source: String, mut recursive: bool, option
         recursive,
         attr_set,
         propagation,
+        recursive_readonly,
     }
 }
 
@@ -318,6 +329,7 @@ mod tests {
         assert_eq!(mounts[0].source, "/run/shm");
         assert!(mounts[0].recursive);
         assert_eq!(mounts[0].attr_set, 0x1);
+        assert!(!mounts[0].recursive_readonly);
         assert_eq!(mounts[0].propagation, 16384 | (1 << 18));
         assert_eq!(mounts[1].destination, "/etc/resolv.conf");
         assert_eq!(mounts[1].attr_set, 0x2);

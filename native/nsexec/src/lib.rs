@@ -247,37 +247,74 @@ fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
         unsafe { libc::_exit(92) };
     }
     // mount_setattr rejects MS_REC in the propagation field. Recursion is AT_RECURSIVE.
+    // Read-only is not recursive unless the mount asked for rro. Applying it with
+    // AT_RECURSIVE makes a nested tmpfs read-only and breaks a normal ro bind.
     let mut setattr_flags = libc::AT_EMPTY_PATH;
     if mount.recursive {
         setattr_flags |= libc::AT_RECURSIVE;
     }
-    // STRICTATIME is rejected on a detached mount. Apply atime after it is attached.
-    let attr = MountAttr {
-        attr_set: mount.attr_set & !0x70,
-        attr_clr: 0,
-        propagation: 0,
-        userns_fd: 0,
-    };
     let empty = std::ffi::CString::new("").unwrap();
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_mount_setattr,
-            mounted,
-            empty.as_ptr(),
-            setattr_flags,
-            &attr as *const MountAttr,
-            std::mem::size_of::<MountAttr>(),
-        )
-    };
-    if rc != 0 {
-        complain(&format!(
-            "failed to prepare bind mount {}: {}",
-            mount.source,
-            std::io::Error::last_os_error()
-        ));
-        unsafe {
-            libc::close(mounted);
-            libc::_exit(92);
+    let attr_set = mount.attr_set & !1 & !0x70;
+    if attr_set != 0 {
+        let attr = MountAttr {
+            attr_set,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: 0,
+        };
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_mount_setattr,
+                mounted,
+                empty.as_ptr(),
+                setattr_flags,
+                &attr as *const MountAttr,
+                std::mem::size_of::<MountAttr>(),
+            )
+        };
+        if rc != 0 {
+            complain(&format!(
+                "failed to prepare bind mount {}: {}",
+                mount.source,
+                std::io::Error::last_os_error()
+            ));
+            unsafe {
+                libc::close(mounted);
+                libc::_exit(92);
+            }
+        }
+    }
+    if mount.attr_set & 1 != 0 {
+        let mut readonly_flags = libc::AT_EMPTY_PATH;
+        if mount.recursive_readonly {
+            readonly_flags |= libc::AT_RECURSIVE;
+        }
+        let readonly = MountAttr {
+            attr_set: 1,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: 0,
+        };
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_mount_setattr,
+                mounted,
+                empty.as_ptr(),
+                readonly_flags,
+                &readonly as *const MountAttr,
+                std::mem::size_of::<MountAttr>(),
+            )
+        };
+        if rc != 0 {
+            complain(&format!(
+                "failed to make bind mount read-only {}: {}",
+                mount.source,
+                std::io::Error::last_os_error()
+            ));
+            unsafe {
+                libc::close(mounted);
+                libc::_exit(92);
+            }
         }
     }
     mounted
@@ -948,6 +985,16 @@ fn enter_exec() {
         }
         libc::close(pipes[0]);
     }
+    // The console socket is on the host. Connect before setns, or the path
+    // disappears with the container mount namespace and the shim waits forever.
+    let tty_slave = if let Some(socket) = console.as_deref() {
+        let (master, slave) = open_pty();
+        send_console(socket, master);
+        unsafe { libc::close(master) };
+        slave
+    } else {
+        -1
+    };
     let mounts = open_namespace(&target, "mnt", false);
     let uts = open_namespace(&target, "uts", false);
     let ipc = open_namespace(&target, "ipc", false);
@@ -965,6 +1012,9 @@ fn enter_exec() {
         unsafe { libc::_exit(79) };
     }
     if grand > 0 {
+        if tty_slave >= 0 {
+            unsafe { libc::close(tty_slave) };
+        }
         let text = grand.to_string();
         write_all(pipes[1], text.as_bytes());
         unsafe { libc::close(pipes[1]) };
@@ -975,8 +1025,8 @@ fn enter_exec() {
         unsafe { libc::_exit(status) };
     }
     unsafe { libc::close(pipes[1]) };
-    if let Some(socket) = console.as_deref() {
-        attach_console(socket);
+    if tty_slave >= 0 {
+        claim_tty(tty_slave);
     }
     if cwd != "/" {
         let path = match std::ffi::CString::new(cwd) {
@@ -1024,11 +1074,8 @@ fn enter_exec() {
 
 
 #[cfg(target_os = "linux")]
-fn attach_console(socket_path: &str) {
+fn open_pty() -> (i32, i32) {
     unsafe {
-        if libc::setsid() < 0 {
-            libc::_exit(98);
-        }
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
         if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
             libc::_exit(97);
@@ -1041,8 +1088,19 @@ fn attach_console(socket_path: &str) {
         if slave < 0 {
             libc::_exit(97);
         }
-        send_console(socket_path, master);
-        libc::close(master);
+        if libc::fcntl(slave, libc::F_SETFD, 0) != 0 {
+            libc::_exit(97);
+        }
+        (master, slave)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn claim_tty(slave: i32) {
+    unsafe {
+        if libc::setsid() < 0 {
+            libc::_exit(98);
+        }
         for fd in 0..3 {
             if libc::dup2(slave, fd) < 0 {
                 libc::_exit(98);
