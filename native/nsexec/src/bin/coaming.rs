@@ -34,6 +34,12 @@ mod linux {
         if invocation.command == "start" && invocation.rest.len() == 1 && !has_poststart(&invocation.root, &invocation.rest[0]) {
             start(&invocation);
         }
+        if invocation.command == "kill" {
+            if let Some(path) = &invocation.log {
+                remember_log(path.clone(), invocation.log_format.clone());
+            }
+            kill_container(&invocation);
+        }
         exec_runtime();
     }
 
@@ -94,6 +100,95 @@ mod linux {
             fail(&format!("open {} failed: {}", path.display(), std::io::Error::last_os_error()));
         }
         fd
+    }
+
+    fn kill_container(invocation: &Invocation) {
+        let mut rest = invocation.rest.clone();
+        let all = take_flag(&mut rest, "--all");
+        if rest.len() != 2 {
+            fail("expected container id and signal");
+        }
+        let Some(signal) = super::signal_number(&rest[1]) else {
+            fail(&format!("unknown signal {}", rest[1]));
+        };
+        let state = container_dir(&invocation.root, &rest[0]);
+        if !state.is_dir() {
+            fail(&format!("container not found: {}", rest[0]));
+        }
+        let mut pids = if all { cgroup_pids(&state) } else { Vec::new() };
+        if pids.is_empty() {
+            pids.push(read_pid(&state.join("pid")));
+        }
+        let mut dropped = false;
+        for pid in pids {
+            signal_process(pid, signal, &mut dropped);
+        }
+        std::process::exit(0);
+    }
+
+    fn signal_process(pid: i32, signal: i32, dropped: &mut bool) {
+        loop {
+            let rc = unsafe { libc::kill(pid, signal) };
+            if rc == 0 {
+                return;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            // containerd allows signals from peer unconfined, runc, or crun. A named
+            // profile stays a distinct peer even with flags=(unconfined), so the kernel
+            // returns EACCES until this process becomes unconfined.
+            if error.raw_os_error() == Some(libc::EACCES) && !*dropped && become_unconfined() {
+                *dropped = true;
+                continue;
+            }
+            let code = error.raw_os_error().unwrap_or(-1);
+            fail(&format!("kill {pid} failed: {code}"));
+        }
+    }
+
+    fn become_unconfined() -> bool {
+        for path in ["/proc/self/attr/apparmor/current", "/proc/self/attr/current"] {
+            let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) else {
+                continue;
+            };
+            use std::io::Write;
+            if file.write_all(b"changeprofile unconfined").is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn cgroup_pids(state: &Path) -> Vec<i32> {
+        let Ok(cgroup) = std::fs::read_to_string(state.join("cgroup")) else {
+            return Vec::new();
+        };
+        let cgroup = cgroup.trim();
+        if cgroup.is_empty() {
+            return Vec::new();
+        }
+        let Ok(text) = std::fs::read_to_string(Path::new(cgroup).join("cgroup.procs")) else {
+            return Vec::new();
+        };
+        text.split_whitespace().filter_map(|item| item.parse().ok()).filter(|pid| *pid > 0).collect()
+    }
+
+    fn read_pid(path: &Path) -> i32 {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            fail("container pid is missing");
+        };
+        text.trim().parse().unwrap_or_else(|_| fail("container pid is invalid"))
+    }
+
+    fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+        if let Some(index) = args.iter().position(|item| item == name) {
+            args.remove(index);
+            true
+        } else {
+            false
+        }
     }
 
     fn has_poststart(root: &Path, id: &str) -> bool {
@@ -225,5 +320,57 @@ mod linux {
 
     thread_local! {
         static LOG: std::cell::RefCell<Option<(PathBuf, String)>> = const { std::cell::RefCell::new(None) };
+    }
+}
+
+fn signal_number(signal: &str) -> Option<i32> {
+    let upper = signal.to_ascii_uppercase();
+    let name = upper.strip_prefix("SIG").unwrap_or(&upper);
+    Some(match name {
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "ILL" => 4,
+        "TRAP" => 5,
+        "ABRT" => 6,
+        "BUS" => 7,
+        "FPE" => 8,
+        "KILL" => 9,
+        "USR1" => 10,
+        "SEGV" => 11,
+        "USR2" => 12,
+        "PIPE" => 13,
+        "ALRM" => 14,
+        "TERM" => 15,
+        "CHLD" => 17,
+        "CONT" => 18,
+        "STOP" => 19,
+        "TSTP" => 20,
+        "TTIN" => 21,
+        "TTOU" => 22,
+        "URG" => 23,
+        "XCPU" => 24,
+        "XFSZ" => 25,
+        "VTALRM" => 26,
+        "PROF" => 27,
+        "WINCH" => 28,
+        "IO" => 29,
+        "PWR" => 30,
+        "SYS" => 31,
+        _ => return signal.parse().ok(),
+    })
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::signal_number;
+
+    #[test]
+    fn named_and_numeric_signals_match_the_runtime() {
+        assert_eq!(signal_number("TERM"), Some(15));
+        assert_eq!(signal_number("SIGKILL"), Some(9));
+        assert_eq!(signal_number("15"), Some(15));
+        assert_eq!(signal_number("SIG15"), None);
+        assert_eq!(signal_number("nope"), None);
     }
 }
