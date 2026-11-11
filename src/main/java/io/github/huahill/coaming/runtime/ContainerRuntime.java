@@ -113,8 +113,9 @@ public final class ContainerRuntime {
 
     public static int init(Path state, Path bundle) throws Exception {
         boolean announced = false;
+        int execFd = -1;
         try {
-            OciConfig config = OciConfig.read(bundle);
+            OciConfig config = OciConfig.read(state);
             String hookId = state.getFileName().toString();
             String hookPid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
             String hookBundle = bundle.toAbsolutePath().toString();
@@ -124,50 +125,62 @@ public final class ContainerRuntime {
             RuntimeFifo.signal(state.resolve("created.fifo").toString());
             announced = true;
             RuntimeFifo.readStartByte(startFd);
-            int execFd = RuntimeFifo.openExecFifo(state.resolve("exec.fifo").toString());
+            execFd = RuntimeFifo.openExecFifo(state.resolve("exec.fifo").toString());
             Path rootfs = config.root(bundle).toAbsolutePath();
-            LinuxCalls.bindPrivate(rootfs.toString());
+            boolean newMount = createsNamespace(config, "mount");
+            if (newMount) {
+                LinuxCalls.bindPrivate(rootfs.toString());
+            }
             boolean mountsProc = false;
             java.util.Map<String, Integer> idmaps = IdmapPlan.descriptors(System::getenv);
             java.util.Map<String, Integer> binds = BindFds.descriptors(System::getenv);
             try {
-                for (OciMount mount : config.mounts()) {
-                    if ("/proc".equals(mount.destination())) {
-                        mountsProc = true;
+                if (newMount) {
+                    for (OciMount mount : config.mounts()) {
+                        if ("/proc".equals(mount.destination())) {
+                            mountsProc = true;
+                        }
+                        mountOne(rootfs, mount, idmaps, binds);
                     }
-                    mountOne(rootfs, mount, idmaps, binds);
                 }
             } finally {
                 for (int descriptor : binds.values()) {
                     LinuxCalls.closeFd(descriptor);
                 }
             }
-            for (DeviceNode device : config.devices()) {
-                if (!device.path().startsWith("/")) {
-                    throw new IllegalArgumentException("device path must be absolute");
+            if (newMount) {
+                for (DeviceNode device : config.devices()) {
+                    if (!device.path().startsWith("/")) {
+                        throw new IllegalArgumentException("device path must be absolute");
+                    }
+                    Path target = rootfs.resolve(device.path().substring(1));
+                    LinuxCalls.createDevice(target.toString(), device.path(), device.type(), device.major(), device.minor(), device.fileMode());
                 }
-                Path target = rootfs.resolve(device.path().substring(1));
-                LinuxCalls.createDevice(target.toString(), device.path(), device.type(), device.major(), device.minor(), device.fileMode());
+                Path oldRoot = rootfs.resolve("oldroot");
+                Files.createDirectories(oldRoot);
+                LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
+                LinuxCalls.chdir("/");
+                if (config.rootfsPropagation() != null) {
+                    LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
+                }
+                LinuxCalls.umountDetach("/oldroot");
+                if (!mountsProc) {
+                    LinuxCalls.mountProc("/proc");
+                }
+                for (Map.Entry<String, String> sysctl : config.sysctl().entrySet()) {
+                    LinuxCalls.writeSysctl(sysctl.getKey(), sysctl.getValue());
+                }
+                defaultDeviceSymlinks();
+                for (String masked : config.maskedPaths()) {
+                    LinuxCalls.mask(masked);
+                }
+                for (String readonly : config.readonlyPaths()) {
+                    LinuxCalls.readonly(readonly);
+                }
             }
-            Path oldRoot = rootfs.resolve("oldroot");
-            Files.createDirectories(oldRoot);
-            LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
-            LinuxCalls.chdir("/");
-            if (config.rootfsPropagation() != null) {
-                LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
+            if (createsNamespace(config, "uts")) {
+                LinuxCalls.hostname(config.hostname());
             }
-            LinuxCalls.umountDetach("/oldroot");
-            if (!mountsProc) {
-                LinuxCalls.mountProc("/proc");
-            }
-            defaultDeviceSymlinks();
-            for (String masked : config.maskedPaths()) {
-                LinuxCalls.mask(masked);
-            }
-            for (String readonly : config.readonlyPaths()) {
-                LinuxCalls.readonly(readonly);
-            }
-            LinuxCalls.hostname(config.hostname());
             if (!"/".equals(config.cwd())) {
                 LinuxCalls.chdir(config.cwd());
             }
@@ -197,13 +210,13 @@ public final class ContainerRuntime {
             try {
                 LinuxCalls.exec(args, config.env().toArray(String[]::new));
             } catch (RuntimeException failure) {
-                if (execFd >= 0) {
-                    RuntimeFifo.signalExecFailed(execFd);
-                }
                 throw failure;
             }
             return 1;
         } catch (Exception failure) {
+            if (execFd >= 0) {
+                RuntimeFifo.signalExecFailed(execFd);
+            }
             if (!announced) {
                 announceFailure(state);
             }
@@ -255,6 +268,18 @@ public final class ContainerRuntime {
             return null;
         }
         return launcher;
+    }
+
+    private static boolean createsNamespace(OciConfig config, String type) {
+        if (!config.namespacesSpecified()) {
+            return false;
+        }
+        for (io.github.huahill.coaming.oci.Namespace namespace : config.namespaces()) {
+            if (type.equals(namespace.type()) && (namespace.path() == null || namespace.path().isBlank())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void applyResources(Path cgroup, io.github.huahill.coaming.json.Json resources) throws Exception {
@@ -403,10 +428,11 @@ public final class ContainerRuntime {
         }
         String bundle = text(state.resolve("bundle"));
         String rootfs = "";
-        if (!bundle.isEmpty()) {
+        OciConfig saved = savedConfig(state);
+        if (saved != null && !bundle.isEmpty()) {
             try {
-                rootfs = OciConfig.read(Path.of(bundle)).root(Path.of(bundle)).toString();
-            } catch (RuntimeException | IOException ignored) {
+                rootfs = saved.root(Path.of(bundle)).toString();
+            } catch (RuntimeException ignored) {
                 rootfs = "";
             }
         }
@@ -450,8 +476,8 @@ public final class ContainerRuntime {
             Cgroups.remove(Files.readString(state.resolve("cgroup")).trim());
         }
         String bundle = text(state.resolve("bundle"));
-        if (!bundle.isEmpty() && Files.exists(Path.of(bundle).resolve("config.json"))) {
-            OciConfig config = OciConfig.read(Path.of(bundle));
+        OciConfig config = savedConfig(state);
+        if (config != null) {
             String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
             runHooks(config, "poststop", hookState(config, id, "stopped", pid, bundle));
         }
@@ -584,6 +610,17 @@ public final class ContainerRuntime {
 
     private static String text(Path path) throws IOException {
         return Files.exists(path) ? Files.readString(path).trim() : "";
+    }
+
+    private static OciConfig savedConfig(Path state) {
+        if (!Files.exists(state.resolve("config.json"))) {
+            return null;
+        }
+        try {
+            return OciConfig.read(state);
+        } catch (RuntimeException | IOException ignored) {
+            return null;
+        }
     }
 
     private static String escape(String value) {

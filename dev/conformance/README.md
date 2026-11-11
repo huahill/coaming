@@ -22,17 +22,9 @@ cri-tools `critest` v1.37.0 has not been run.
 
 ## runtime-tools
 
-Re-ran the cases that had failed inside the boundary, with the wrapper, after the lifecycle fixes:
+Passed inside the boundary, with the systemd wrapper: `delete`, `killsig`, `config_updates_without_affect`, `linux_ns_itype`, `linux_ns_path_type`, `misc_props`, `process_rlimits_fail`, `linux_rootfs_propagation`, `process_capabilities`, `hooks_stdin`, `mounts`.
 
-Passed: `linux_ns_path_type`, `misc_props`, `process_rlimits_fail`, `linux_rootfs_propagation`, `process_capabilities`, `hooks_stdin`, `mounts`. The created-container half of `delete` also passes.
+Outside the boundary, and rejected rather than emulated:
 
-Still failing:
-
-- `delete` of a container whose config is `sleep 30`. Delete returns success and removes the container. The created-container case is refused.
-- `killsig`. `TERM`, `USR1`, and `USR2` are accepted, but the trap does not create the expected file in the rootfs.
-- `config_updates_without_affect`. `start` succeeds after `config.json` is replaced. The process inside the container then exits 1.
-- `linux_ns_itype`. A config with no `linux.namespaces` gets the default pid, mount, uts, ipc, and network namespaces. The spec allows that default. This test wants the host namespaces instead.
-- `delete_resources` looks for a cgroup v1 pids hierarchy. v1 is not implemented.
-- `delete_only_create_resources` still fails; its output has no assertion text.
-
-cgroup v1 cases (`linux_cgroups_*` and `linux_cgroups_relative_*`) were not re-run. They fail closed.
+- `delete_resources` and `delete_only_create_resources` look for a cgroup v1 pids hierarchy.
+- `linux_cgroups_*` and `linux_cgroups_relative_*` require cgroup v1. They were not re-run. A v1 request is rejected.

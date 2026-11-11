@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks, Map<String, String> annotations, String rootfsPropagation) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks, Map<String, String> annotations, String rootfsPropagation, Map<String, String> sysctl) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -128,7 +128,7 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         boolean noNewPrivileges = process.optional("noNewPrivileges") != null && process.optional("noNewPrivileges").booleanValue();
         Integer oomScoreAdj = process.optional("oomScoreAdj") == null ? null : (int) process.optional("oomScoreAdj").longValue();
         Json resources = linux == null ? null : linux.optional("resources");
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root), readAnnotations(root), rootfsPropagation(linux));
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root), readAnnotations(root), rootfsPropagation(linux), readSysctl(linux));
     }
 
 
@@ -166,6 +166,18 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
             case "private", "rprivate", "shared", "rshared", "slave", "rslave", "unbindable", "runbindable" -> value;
             default -> throw new IllegalArgumentException("unsupported rootfs propagation " + value);
         };
+    }
+
+    private static Map<String, String> readSysctl(Json linux) {
+        if (linux == null || !(linux.optional("sysctl") instanceof Json.Obj obj)) {
+            return Map.of();
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (Map.Entry<String, Json> entry : obj.fields().entrySet()) {
+            Json value = entry.getValue();
+            values.put(entry.getKey(), value instanceof Json.Str str ? str.value() : Long.toString(value.longValue()));
+        }
+        return Map.copyOf(values);
     }
 
     private static Map<String, String> readAnnotations(Json root) {

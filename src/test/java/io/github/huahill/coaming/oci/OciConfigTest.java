@@ -102,8 +102,8 @@ class OciConfigTest {
     }
 
     @Test
-    void missingNamespacesUseTheRuntimeDefault() {
-        assertEquals(List.of("--unshare", "pid,mount,uts,ipc,network"), NamespacePlan.arguments(List.of(), false));
+    void missingNamespacesInheritTheHost() {
+        assertEquals(List.of("--unshare", "none"), NamespacePlan.arguments(List.of(), false));
     }
 
     @Test

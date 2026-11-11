@@ -19,6 +19,22 @@ class SystemdDevicesTest {
     }
 
     @Test
+    void aBareDenyAllKeepsTheStandardDevices() {
+        SystemdDevices.Program program = SystemdDevices.translate(List.of(
+                new DeviceRule(false, "a", "rwm", true, null, null)));
+
+        assertEquals("strict", program.policy());
+        assertEquals(List.of(
+                new SystemdDevices.Allow("/dev/char/1:3", "rwm"),
+                new SystemdDevices.Allow("/dev/char/1:5", "rwm"),
+                new SystemdDevices.Allow("/dev/char/1:7", "rwm"),
+                new SystemdDevices.Allow("/dev/char/1:8", "rwm"),
+                new SystemdDevices.Allow("/dev/char/1:9", "rwm"),
+                new SystemdDevices.Allow("/dev/char/5:0", "rwm"),
+                new SystemdDevices.Allow("char-pts", "rwm")), program.allows());
+    }
+
+    @Test
     void anUnrestrictedRuleDoesNotSetDevicePolicy() {
         SystemdDevices.Program program = SystemdDevices.translate(List.of(
                 new DeviceRule(true, "a", "rwm", true, null, null)));

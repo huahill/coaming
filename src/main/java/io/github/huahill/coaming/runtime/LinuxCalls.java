@@ -225,6 +225,18 @@ final class LinuxCalls {
         }
     }
 
+    static void writeSysctl(String key, String value) {
+        if (key.isBlank() || key.contains("..") || key.contains("/")) {
+            throw new IllegalArgumentException("invalid sysctl " + key);
+        }
+        String path = "/proc/sys/" + key.replace('.', '/');
+        try {
+            Files.writeString(Path.of(path), value + "\n");
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("sysctl " + key + " failed", failure);
+        }
+    }
+
     static void chown(String path, long uid, long gid) {
         int user = io.github.huahill.coaming.oci.IdMap.bits(uid);
         int group = io.github.huahill.coaming.oci.IdMap.bits(gid);
@@ -488,18 +500,6 @@ final class LinuxCalls {
         }
         try (Arena arena = Arena.ofConfined()) {
             for (var syscall : profile.syscalls()) {
-                MemorySegment arguments = MemorySegment.NULL;
-                if (!syscall.args().isEmpty()) {
-                    arguments = arena.allocate(24L * syscall.args().size());
-                    int offset = 0;
-                    for (var argument : syscall.args()) {
-                        arguments.set(ValueLayout.JAVA_INT, offset, argument.index());
-                        arguments.set(ValueLayout.JAVA_INT, offset + 4, argument.operation());
-                        arguments.set(ValueLayout.JAVA_LONG, offset + 8, argument.value());
-                        arguments.set(ValueLayout.JAVA_LONG, offset + 16, argument.valueTwo());
-                        offset += 24;
-                    }
-                }
                 for (String name : syscall.names()) {
                     int number;
                     try {
@@ -512,16 +512,7 @@ final class LinuxCalls {
                         System.err.println("coaming: seccomp skip " + name);
                         continue;
                     }
-                    int rc;
-                    try {
-                        rc = (int) SECCOMP_RULE.invokeExact(context, syscall.action(), number, syscall.args().size(), arguments);
-                    } catch (Throwable failure) {
-                        throw new IllegalStateException("seccomp rule failed", failure);
-                    }
-                    decision = SeccompDecision.decide(number, rc);
-                    if (decision == SeccompDecision.Result.FAIL) {
-                        throw new IllegalStateException("seccomp rule " + name + " failed: " + rc);
-                    }
+                    addSeccompRules(context, arena, syscall.action(), number, syscall.args());
                 }
             }
             int attr;
@@ -541,6 +532,43 @@ final class LinuxCalls {
             } catch (Throwable ignored) {
                 // The load error is the one that matters.
             }
+        }
+    }
+
+    private static void addSeccompRules(MemorySegment context, Arena arena, int action, int number,
+            List<io.github.huahill.coaming.oci.SeccompProfile.Argument> args) {
+        boolean sameIndex = !args.isEmpty() && args.stream().map(io.github.huahill.coaming.oci.SeccompProfile.Argument::index).distinct().count() == 1;
+        if (args.size() > 1 && sameIndex) {
+            for (var argument : args) {
+                addSeccompRule(context, arena, action, number, List.of(argument));
+            }
+            return;
+        }
+        addSeccompRule(context, arena, action, number, args);
+    }
+
+    private static void addSeccompRule(MemorySegment context, Arena arena, int action, int number,
+            List<io.github.huahill.coaming.oci.SeccompProfile.Argument> args) {
+        MemorySegment arguments = MemorySegment.NULL;
+        if (!args.isEmpty()) {
+            arguments = arena.allocate(24L * args.size());
+            int offset = 0;
+            for (var argument : args) {
+                arguments.set(ValueLayout.JAVA_INT, offset, argument.index());
+                arguments.set(ValueLayout.JAVA_INT, offset + 4, argument.operation());
+                arguments.set(ValueLayout.JAVA_LONG, offset + 8, argument.value());
+                arguments.set(ValueLayout.JAVA_LONG, offset + 16, argument.valueTwo());
+                offset += 24;
+            }
+        }
+        int rc;
+        try {
+            rc = (int) SECCOMP_RULE.invokeExact(context, action, number, args.size(), arguments);
+        } catch (Throwable failure) {
+            throw new IllegalStateException("seccomp rule failed", failure);
+        }
+        if (SeccompDecision.decide(number, rc) == SeccompDecision.Result.FAIL) {
+            throw new IllegalStateException("seccomp rule failed: " + rc);
         }
     }
 

@@ -46,6 +46,16 @@ public final class SystemdDevices {
         if (!strict) {
             return new Program(null, List.of());
         }
+        if (allows.isEmpty()) {
+            // A bare deny-all still leaves the devices a container needs to run.
+            grant(allows, "/dev/char/1:3", "rwm");
+            grant(allows, "/dev/char/1:5", "rwm");
+            grant(allows, "/dev/char/1:7", "rwm");
+            grant(allows, "/dev/char/1:8", "rwm");
+            grant(allows, "/dev/char/1:9", "rwm");
+            grant(allows, "/dev/char/5:0", "rwm");
+            grant(allows, "char-pts", "rwm");
+        }
         return new Program("strict", List.copyOf(allows));
     }
 

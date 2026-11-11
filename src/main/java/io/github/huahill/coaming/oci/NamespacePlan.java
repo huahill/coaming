@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Set;
 
 public final class NamespacePlan {
-    private static final List<String> DEFAULTS = List.of("pid", "mount", "uts", "ipc", "network");
     private static final Set<String> SUPPORTED = Set.of("pid", "mount", "uts", "ipc", "network", "cgroup", "user");
 
     private NamespacePlan() {}
@@ -20,7 +19,8 @@ public final class NamespacePlan {
             if (!uidMappings.isEmpty() || !gidMappings.isEmpty()) {
                 throw new IllegalArgumentException("id mappings require a user namespace");
             }
-            return List.of("--unshare", String.join(",", DEFAULTS));
+            // A missing namespaces array lists no type, so each namespace is inherited.
+            return List.of("--unshare", "none");
         }
         Set<String> seen = new LinkedHashSet<>();
         List<String> unshare = new ArrayList<>();
