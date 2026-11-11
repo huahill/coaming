@@ -272,6 +272,12 @@ public final class ContainerRuntime {
         Integer preparedBind = binds.get(mount.destination());
         if (preparedBind != null) {
             LinuxCalls.moveMount(preparedBind, dest.toString());
+            long remount = MountPlan.BIND | MountPlan.REMOUNT
+                    | (prepared.flags() & (MountPlan.NOSUID | MountPlan.NODEV | MountPlan.NOEXEC | MountPlan.STRICTATIME | MountPlan.NOATIME | MountPlan.RDONLY));
+            if (prepared.remount() != 0) {
+                remount |= MountPlan.RDONLY;
+            }
+            LinuxCalls.remount(dest.toString(), remount);
             if (prepared.propagation() != 0) {
                 LinuxCalls.propagation(dest.toString(), prepared.propagation());
             }

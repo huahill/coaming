@@ -218,8 +218,9 @@ fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
     if mount.recursive {
         setattr_flags |= libc::AT_RECURSIVE;
     }
+    // STRICTATIME is rejected on a detached mount. Apply atime after it is attached.
     let attr = MountAttr {
-        attr_set: mount.attr_set,
+        attr_set: mount.attr_set & !0x70,
         attr_clr: 0,
         propagation: 0,
         userns_fd: 0,

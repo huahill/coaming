@@ -150,6 +150,10 @@ final class LinuxCalls {
         check(mount(path, path, null, MS_BIND | 32 | 1, null), "readonly remount " + path);
     }
 
+    static void remount(String target, long flags) {
+        check(mount(null, target, null, flags, null), "remount " + target);
+    }
+
     static void propagation(String target, long flags) {
         check(mount(null, target, null, flags, null), "propagation " + target);
     }
