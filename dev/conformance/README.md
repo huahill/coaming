@@ -1,37 +1,38 @@
 # Conformance
 
-Pass means every case that stays inside the supported boundary: Linux, cgroup v2, no SELinux, no cgroup v1. A case outside that boundary must fail closed, not report success.
+A case passes only when it stays inside the supported boundary: Linux, cgroup v2, no SELinux, and no cgroup v1. A case outside that boundary must fail closed.
 
 ## Tools
 
 Versions are pinned in `versions.txt`.
 
 ```sh
-# runtime-tools v0.9.0, from its GOPATH checkout
+# runtime-tools v0.9.0, built from the GOPATH checkout
 sudo RUNTIME=/path/to/coaming make localvalidation
 ```
 
-`make localvalidation` does not pass `--systemd-cgroup`. On this runtime a device allowlist is rejected unless that flag is set, so the suite has to be pointed at a wrapper that execs `coaming --systemd-cgroup "$@"`. That flag is required; skipping the device rules would be the wrong result.
+`make localvalidation` cannot pass `--systemd-cgroup`. Device allowlists are rejected without that flag, so the run uses a wrapper that execs `coaming --systemd-cgroup "$@"`. The wrapper is not part of this repository.
 
 ```sh
 critest --runtime-endpoint unix:///run/coaming-containerd/containerd.sock
 critest --runtime-endpoint unix:///var/run/crio/crio.sock
 ```
 
-cri-tools `critest` v1.37.0 is the containerd CRI run and the cri-o run. It has not been executed yet.
+cri-tools `critest` v1.37.0 has not been run.
 
 ## runtime-tools
 
-Ran on the cgroup v2 systemd host with the wrapper above, against the binary before the later exec-wait fix:
+Re-ran the cases that had failed inside the boundary, with the wrapper, after the lifecycle fixes:
 
-- 28 cases passed, including create, hooks, hostname, seccomp, masked and read-only paths, id mappings, and prestart/poststart/poststop.
-- cgroup v1 cases failed closed: `linux_cgroups_blkio`, `linux_cgroups_cpus`, `linux_cgroups_devices`, `linux_cgroups_hugetlb`, `linux_cgroups_memory`, `linux_cgroups_network`, `linux_cgroups_pids`, and the `linux_cgroups_relative_*` twins. v1 is not implemented.
-- `linux_mount_label` passed. A non-empty SELinux label is still rejected at create; this case did not require applying one.
+Passed: `linux_ns_path_type`, `misc_props`, `process_rlimits_fail`, `linux_rootfs_propagation`, `process_capabilities`, `hooks_stdin`, `mounts`. The created-container half of `delete` also passes.
 
-Still failing inside the boundary after that run, and not all of them have been re-run:
+Still failing:
 
-- `killsig` still fails. `USR1` and `USR2` are accepted, and `hooks_stdin` now passes, but the trap in `killsig` does not create its file.
-- `delete`, `delete_only_create_resources`, `delete_resources` do not yet match the lifecycle rules.
-- `linux_ns_itype`, `linux_ns_path_type`, `linux_rootfs_propagation`, `misc_props`, `mounts`, `process_capabilities`, `process_rlimits_fail`, `config_updates_without_affect`.
+- `delete` of a container whose config is `sleep 30`. Delete returns success and removes the container. The created-container case is refused.
+- `killsig`. `TERM`, `USR1`, and `USR2` are accepted, but the trap does not create the expected file in the rootfs.
+- `config_updates_without_affect`. `start` succeeds after `config.json` is replaced. The process inside the container then exits 1.
+- `linux_ns_itype`. A config with no `linux.namespaces` gets the default pid, mount, uts, ipc, and network namespaces. The spec allows that default. This test wants the host namespaces instead.
+- `delete_resources` looks for a cgroup v1 pids hierarchy. v1 is not implemented.
+- `delete_only_create_resources` still fails; its output has no assertion text.
 
-`process_capabilities` was missing the default `/dev` nodes. Those nodes are created when `linux.devices` is absent. That case has not been re-run.
+cgroup v1 cases (`linux_cgroups_*` and `linux_cgroups_relative_*`) were not re-run. They fail closed.
