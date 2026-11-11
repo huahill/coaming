@@ -30,6 +30,10 @@ public record CommandLine(Path root, Path log, String logFormat, boolean systemd
                 }
                 case "--debug" -> rejectInline(option, inline);
                 case "--rootless" -> value(rest, option, inline);
+                case "--version" -> {
+                    rejectInline(option, inline);
+                    return new CommandLine(root, log, logFormat, systemdCgroup, "version", List.of());
+                }
                 default -> throw new IllegalArgumentException("unknown option " + token);
             }
         }

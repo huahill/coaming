@@ -38,6 +38,10 @@ public final class CoamingMain {
     private static int dispatch(CommandLine line) throws Exception {
         List<String> rest = new ArrayList<>(line.arguments());
         return switch (line.command()) {
+            case "version" -> {
+                System.out.println(Coaming.versionLine());
+                yield 0;
+            }
             case "probe" -> ProbeMain.run(System.getenv(), System.out);
             case "features" -> {
                 System.out.println(Features.json().strip());
