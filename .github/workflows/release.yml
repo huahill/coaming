@@ -41,13 +41,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install native build packages
+      - name: Install libseccomp
         run: |
           command -v cc >/dev/null
-          base=http://archive.ubuntu.com/ubuntu/pool/main/libs/libseccomp
-          curl -fsSL -o /tmp/libseccomp2.deb "$base/libseccomp2_2.5.5-1ubuntu3.1_amd64.deb"
-          curl -fsSL -o /tmp/libseccomp-dev.deb "$base/libseccomp-dev_2.5.5-1ubuntu3.1_amd64.deb"
-          sudo dpkg -i /tmp/libseccomp2.deb /tmp/libseccomp-dev.deb
+          command -v make >/dev/null
+          curl -fsSL -o /tmp/libseccomp.tar.gz -L https://github.com/seccomp/libseccomp/releases/download/v2.5.5/libseccomp-2.5.5.tar.gz
+          echo "248a2c8a4d9b9858aa6baf52712c34afefcf9c9e94b76dce02c1c9aa25fb3375  /tmp/libseccomp.tar.gz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/libseccomp.tar.gz
+          cd /tmp/libseccomp-2.5.5
+          ./configure --prefix=/usr --libdir=/usr/lib/x86_64-linux-gnu
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
 
       - name: Install Maven 4.0.0-rc-5
         run: |
