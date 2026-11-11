@@ -858,6 +858,7 @@ fn enter_exec() {
     let mut rlimits = None;
     let mut oom = None;
     let mut apparmor = None;
+    let mut console = None;
     let mut user = Vec::new();
     let mut index = 2usize;
     while index < parts.len() {
@@ -906,6 +907,10 @@ fn enter_exec() {
             }
             "--apparmor" => {
                 apparmor = parts.get(index + 1).cloned();
+                index += 2;
+            }
+            "--console" => {
+                console = parts.get(index + 1).cloned();
                 index += 2;
             }
             "--" => {
@@ -970,6 +975,9 @@ fn enter_exec() {
         unsafe { libc::_exit(status) };
     }
     unsafe { libc::close(pipes[1]) };
+    if let Some(socket) = console.as_deref() {
+        attach_console(socket);
+    }
     if cwd != "/" {
         let path = match std::ffi::CString::new(cwd) {
             Ok(value) => value,
@@ -1013,6 +1021,68 @@ fn enter_exec() {
     }
 }
 
+
+
+#[cfg(target_os = "linux")]
+fn attach_console(socket_path: &str) {
+    unsafe {
+        if libc::setsid() < 0 {
+            libc::_exit(98);
+        }
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::_exit(97);
+        }
+        let mut name = [0i8; 128];
+        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+            libc::_exit(97);
+        }
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+        if slave < 0 {
+            libc::_exit(97);
+        }
+        send_console(socket_path, master);
+        libc::close(master);
+        for fd in 0..3 {
+            if libc::dup2(slave, fd) < 0 {
+                libc::_exit(98);
+            }
+        }
+        if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 && libc::ioctl(0, libc::TIOCSCTTY, 1) < 0 {
+            libc::_exit(98);
+        }
+        if slave > 2 {
+            libc::close(slave);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_console(path: &str, fd: i32) {
+    unsafe {
+        let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if sock < 0 {
+            libc::_exit(96);
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_bytes();
+        if bytes.len() + 1 > addr.sun_path.len() {
+            libc::_exit(96);
+        }
+        for (index, byte) in bytes.iter().enumerate() {
+            addr.sun_path[index] = *byte as libc::c_char;
+        }
+        let length = std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1;
+        if libc::connect(sock, (&addr as *const libc::sockaddr_un).cast(), length as libc::socklen_t) != 0 {
+            libc::_exit(96);
+        }
+        if !send_fd(sock, fd) {
+            libc::_exit(96);
+        }
+        libc::close(sock);
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn drop_bounding(spec: &str) {
