@@ -18,19 +18,29 @@ critest --runtime-endpoint unix:///run/coaming-containerd/containerd.sock
 critest --runtime-endpoint unix:///var/run/crio/crio.sock
 ```
 
-cri-tools `critest` v1.37.0 was run against containerd. It did not finish.
+cri-tools `critest` v1.37.0 against containerd, on the current binary:
 
-`kill` initially returned errno 13. containerd's default AppArmor profile accepts signals from peer `unconfined`, `runc`, or `crun`. The named `coaming` profile stays a distinct peer even with `flags=(unconfined)`. The launcher now drops that label before signalling. After that change, container stop no longer failed with errno 13.
+```
+Ran 119 of 142 Specs in 704.478 seconds
+FAIL! -- 96 Passed | 23 Failed | 0 Pending | 23 Skipped
+```
 
-The same run then stopped in `runtime should support exec with tty=true and stdin=true`. The non-tty exec in that run returned. The launcher creates a pty and sends the master back on `--console-socket`, but that spec still did not return.
+`kill` no longer fails with errno 13. Exec with a tty returns. A read-only bind leaves a nested mount writable, and exec applies uid, gid, and supplemental groups.
 
-Before the hang, these in-boundary specs failed:
+The 23 failures:
 
-- OOM: the status reason stayed `Error` instead of `OOMKilled`.
-- host-network port forward: the connection to the container port was refused.
-- `execSync` with a timeout: containerd reported `cannot exec in a stopped state`.
+- port forward, host-network port forward, and both host-port mappings
+- attach cleanup, log reopen, and the multi-container log
+- execSync timeout
+- pod sandbox metrics and multi-container pod network
+- HostPID, PodPID, and RunAsUserName
+- ReadOnlyRootfs, privileged disabled, and dropping capabilities
+- three seccomp profiles
+- deprecated permissive AppArmor profile
+- pod user namespace when an idmap mount is required
+- OOM reason stays `Error` instead of `OOMKilled`
 
-`gcr.io` pulls from containerd still time out when the daemon dials the registry directly. Images already present are reused. cri-o `critest` has not been run.
+cri-o `critest` has not been run.
 
 ## runtime-tools
 
