@@ -44,6 +44,15 @@ Three samples on one cgroup v2 machine. The bundle is the same for both. The clo
 | runc 1.4.2 | 23 ms, 1304 KiB | 25 ms, 1300 KiB | 29 ms, 1300 KiB |
 
 
+## Install
+
+`dev/package.sh` packs `target/coaming` into `coaming-<version>-linux-amd64.tar.gz`. The version is `Coaming.VERSION`.
+
+Point containerd's `BinaryName` at the unpacked `coaming` and restart that containerd. The shim stays `containerd-shim-runc-v2`. Point cri-o's `runtime_path` at the same binary and restart crio.
+
+To roll back, point `BinaryName` or `runtime_path` at the previous runtime and restart only that service.
+
+
 ## License
 
 [Apache-2.0](LICENSE)

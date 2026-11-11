@@ -44,6 +44,15 @@ containerd 把 `BinaryName` 指到这个二进制，shim 仍是 `containerd-shim
 | runc 1.4.2 | 23 ms，1304 KiB | 25 ms，1300 KiB | 29 ms，1300 KiB |
 
 
+## 安装
+
+`dev/package.sh` 把 `target/coaming` 打成 `coaming-<version>-linux-amd64.tar.gz`。版本号来自 `Coaming.VERSION`。
+
+containerd 把 `BinaryName` 指到解压出的 `coaming`，然后重启那个 containerd。shim 仍是 `containerd-shim-runc-v2`。cri-o 把 `runtime_path` 指到同一个二进制，然后重启 crio。
+
+要退回时，把 `BinaryName` 或 `runtime_path` 指回原来的运行时，并且只重启那个服务。
+
+
 ## 许可证
 
 [Apache-2.0](LICENSE)
