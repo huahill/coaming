@@ -896,6 +896,7 @@ fn enter_exec() {
     let mut oom = None;
     let mut apparmor = None;
     let mut console = None;
+    let mut seccomp = None;
     let mut user = Vec::new();
     let mut index = 2usize;
     while index < parts.len() {
@@ -950,6 +951,10 @@ fn enter_exec() {
                 console = parts.get(index + 1).cloned();
                 index += 2;
             }
+            "--seccomp" => {
+                seccomp = parts.get(index + 1).cloned();
+                index += 2;
+            }
             "--" => {
                 user.extend(parts[index + 1..].iter().cloned());
                 break;
@@ -963,6 +968,10 @@ fn enter_exec() {
     if user.is_empty() {
         unsafe { libc::_exit(82) };
     }
+    let seccomp_rules = match seccomp.as_deref() {
+        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+        None => String::new(),
+    };
     let mut pipes = [0; 2];
     unsafe {
         if libc::pipe(pipes.as_mut_ptr()) != 0 {
@@ -995,6 +1004,7 @@ fn enter_exec() {
     } else {
         -1
     };
+    let seccomp_api = if seccomp_rules.is_empty() { None } else { Some(open_seccomp_api()) };
     let mounts = open_namespace(&target, "mnt", false);
     let uts = open_namespace(&target, "uts", false);
     let ipc = open_namespace(&target, "ipc", false);
@@ -1015,7 +1025,8 @@ fn enter_exec() {
         if tty_slave >= 0 {
             unsafe { libc::close(tty_slave) };
         }
-        let text = grand.to_string();
+        let host_pid = host_pid_of(grand);
+        let text = host_pid.to_string();
         write_all(pipes[1], text.as_bytes());
         unsafe { libc::close(pipes[1]) };
         if detach {
@@ -1050,6 +1061,11 @@ fn enter_exec() {
     if no_new_privs && unsafe { libc::prctl(38, 1, 0, 0, 0) } != 0 {
         unsafe { libc::_exit(91) };
     }
+    if let Some(api) = seccomp_api {
+        if !seccomp_rules.is_empty() {
+            install_seccomp_rules(&seccomp_rules, &api);
+        }
+    }
     if let Some(program) = user.first().cloned() {
         user[0] = resolve_program(&program, &envs);
     }
@@ -1072,6 +1088,159 @@ fn enter_exec() {
 }
 
 
+
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SeccompArg {
+    index: u32,
+    op: u32,
+    value: u64,
+    value_two: u64,
+}
+
+#[cfg(target_os = "linux")]
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct SeccompApi {
+    log: i32,
+    init: unsafe extern "C" fn(u32) -> *mut libc::c_void,
+    resolve: unsafe extern "C" fn(*const libc::c_char) -> i32,
+    add: unsafe extern "C" fn(*mut libc::c_void, u32, i32, u32, *const SeccompArg) -> i32,
+    attr: unsafe extern "C" fn(*mut libc::c_void, u32, u32) -> i32,
+    load: unsafe extern "C" fn(*mut libc::c_void) -> i32,
+    release: unsafe extern "C" fn(*mut libc::c_void),
+}
+
+#[cfg(target_os = "linux")]
+fn open_seccomp_api() -> SeccompApi {
+    unsafe {
+        let path = std::ffi::CString::new("/tmp/coaming-seccomp.log").unwrap();
+        let log = libc::open(path.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC, 0o644);
+        let library = std::ffi::CString::new("libseccomp.so.2").unwrap();
+        let handle = libc::dlopen(library.as_ptr(), libc::RTLD_NOW);
+        if handle.is_null() {
+            seccomp_note(log, "dlopen failed");
+            libc::_exit(94);
+        }
+        SeccompApi {
+            log,
+            init: load_symbol(handle, "seccomp_init"),
+            resolve: load_symbol(handle, "seccomp_syscall_resolve_name"),
+            add: load_symbol(handle, "seccomp_rule_add_array"),
+            attr: load_symbol(handle, "seccomp_attr_set"),
+            load: load_symbol(handle, "seccomp_load"),
+            release: load_symbol(handle, "seccomp_release"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_seccomp_rules(text: &str, api: &SeccompApi) {
+    let mut default_action = 0x7fff0000u32;
+    let mut rules = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        match parts.next() {
+            Some("DEFAULT") => {
+                default_action = parts.next().and_then(|value| value.parse().ok()).unwrap_or(default_action);
+            }
+            Some("RULE") => {
+                let Some(action) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+                    continue;
+                };
+                let Some(name) = parts.next() else { continue };
+                let numbers: Vec<&str> = parts.collect();
+                let mut args = Vec::new();
+                let mut index = 0;
+                while index + 3 < numbers.len() {
+                    let Ok(arg_index) = numbers[index].parse::<u32>() else { break };
+                    let Ok(op) = numbers[index + 1].parse::<u32>() else { break };
+                    let Ok(value) = numbers[index + 2].parse::<u64>() else { break };
+                    let Ok(value_two) = numbers[index + 3].parse::<u64>() else { break };
+                    args.push(SeccompArg { index: arg_index, op, value, value_two });
+                    index += 4;
+                }
+                rules.push((action, name.to_string(), args));
+            }
+            _ => {}
+        }
+    }
+    unsafe {
+        let context = (api.init)(default_action);
+        if context.is_null() {
+            seccomp_note(api.log, "seccomp_init returned null");
+            libc::_exit(94);
+        }
+        for (action, name, args) in &rules {
+            let c_name = match std::ffi::CString::new(name.as_str()) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let number = (api.resolve)(c_name.as_ptr());
+            if number < 0 {
+                continue;
+            }
+            let groups = seccomp_rule_groups(args);
+            for group in groups {
+                let pointer = if group.is_empty() { std::ptr::null() } else { group.as_ptr() };
+                let rc = (api.add)(context, *action, number, group.len() as u32, pointer);
+                if rc != 0 {
+                    seccomp_note(api.log, &format!("add {name} number={number} args={} rc={rc}", group.len()));
+                    (api.release)(context);
+                    libc::_exit(94);
+                }
+            }
+        }
+        // seccomp.h: NNP is 3, TSYNC is 4, TSKIP is 5. 2 is BADARCH and rejects a boolean.
+        let attr_nnp = (api.attr)(context, 3, 1);
+        let attr_sync = (api.attr)(context, 4, 1);
+        let attr_skip = (api.attr)(context, 5, 1);
+        let loaded = (api.load)(context);
+        if attr_nnp != 0 || attr_sync != 0 || attr_skip != 0 || loaded != 0 {
+            seccomp_note(api.log, &format!("load nnp={attr_nnp} sync={attr_sync} skip={attr_skip} load={loaded} rules={}", rules.len()));
+            (api.release)(context);
+            libc::_exit(94);
+        }
+        (api.release)(context);
+    }
+}
+
+#[cfg(target_os = "linux")]
+
+#[cfg(target_os = "linux")]
+fn seccomp_note(log: i32, message: &str) {
+    if log < 0 {
+        return;
+    }
+    let line = format!("{message}\n");
+    unsafe {
+        libc::write(log, line.as_ptr().cast(), line.len());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn seccomp_rule_groups(args: &[SeccompArg]) -> Vec<Vec<SeccompArg>> {
+    if args.len() > 1 && args.iter().all(|arg| arg.index == args[0].index) {
+        args.iter().map(|arg| vec![*arg]).collect()
+    } else if args.is_empty() {
+        vec![Vec::new()]
+    } else {
+        vec![args.to_vec()]
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn load_symbol<T>(handle: *mut libc::c_void, name: &str) -> T {
+    let c_name = std::ffi::CString::new(name).unwrap();
+    let symbol = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
+    if symbol.is_null() {
+        unsafe { libc::_exit(94) };
+    }
+    unsafe { std::mem::transmute_copy(&symbol) }
+}
 
 #[cfg(target_os = "linux")]
 fn open_pty() -> (i32, i32) {
@@ -1322,6 +1491,28 @@ fn enter_namespace(fd: i32, required: bool) {
 }
 
 #[cfg(target_os = "linux")]
+fn host_pid_of(pid: i32) -> i32 {
+    let path = format!("/proc/{pid}/status");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    host_pid_from_status(&text, pid)
+}
+
+fn host_pid_from_status(text: &str, fallback: i32) -> i32 {
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("NSpid:") else {
+            continue;
+        };
+        // The first id is the pid in the outermost namespace, which is what containerd kills.
+        if let Some(value) = rest.split_whitespace().next().and_then(|item| item.parse().ok()) {
+            if value > 0 {
+                return value;
+            }
+        }
+    }
+    fallback
+}
+
+#[cfg(target_os = "linux")]
 fn read_i32(fd: i32) -> i32 {
     let mut buf = [0u8; 32];
     let mut used = 0usize;
@@ -1386,5 +1577,16 @@ fn set_env(key: &str, value: &str) {
     let value = std::ffi::CString::new(value).expect("probe env value");
     unsafe {
         libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::host_pid_from_status;
+
+    #[test]
+    fn outermost_nspid_is_the_host_pid() {
+        assert_eq!(host_pid_from_status("Pid:\t2\nNSpid:\t4242\t2\n", 2), 4242);
+        assert_eq!(host_pid_from_status("Pid:\t9\n", 9), 9);
     }
 }

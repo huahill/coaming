@@ -98,8 +98,33 @@ class ResourcesTest {
     }
 
     @Test
+    void disablesSwapWhenAMemoryLimitDoesNotNameSwap() throws Exception {
+        Files.writeString(cgroup.resolve("memory.max"), "");
+        Files.writeString(cgroup.resolve("memory.swap.max"), "");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"memory":{"limit":4096}}
+                """));
+
+        assertEquals("0", Files.readString(cgroup.resolve("memory.swap.max")).trim());
+    }
+
+    @Test
+    void convertsTheOciSwapTotalToCgroupV2Swap() throws Exception {
+        Files.writeString(cgroup.resolve("memory.max"), "");
+        Files.writeString(cgroup.resolve("memory.swap.max"), "");
+
+        Resources.apply(cgroup, Json.parse("""
+                {"memory":{"limit":4096,"swap":8192}}
+                """));
+
+        assertEquals("4096", Files.readString(cgroup.resolve("memory.swap.max")).trim());
+    }
+
+    @Test
     void letsUnifiedOverrideTheStructuredValue() throws Exception {
         Files.writeString(cgroup.resolve("memory.max"), "");
+        Files.writeString(cgroup.resolve("memory.swap.max"), "");
         Files.writeString(cgroup.resolve("memory.high"), "");
 
         Resources.apply(cgroup, Json.parse("""
@@ -107,6 +132,7 @@ class ResourcesTest {
                 """));
 
         assertEquals("8192", Files.readString(cgroup.resolve("memory.max")).trim());
+        assertEquals("0", Files.readString(cgroup.resolve("memory.swap.max")).trim());
         assertEquals("2048", Files.readString(cgroup.resolve("memory.high")).trim());
     }
 

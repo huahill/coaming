@@ -27,6 +27,9 @@ final class Resources {
             if (limit != null) {
                 long value = limit.longValue();
                 write(cgroup.resolve("memory.max"), value < 0 ? "max" : Long.toString(value));
+                if (value > 0) {
+                    writeSwap(cgroup, memory, resources.optional("unified"), value);
+                }
             }
         }
         Json pids = resources.optional("pids");
@@ -62,6 +65,27 @@ final class Resources {
                 write(cgroup.resolve(key), entry.getValue().string());
             }
         }
+    }
+
+    private static void writeSwap(Path cgroup, Json memory, Json unified, long limit) throws IOException {
+        if (unified instanceof Json.Obj object && object.fields().containsKey("memory.swap.max")) {
+            return;
+        }
+        Json swap = memory.optional("swap");
+        String value;
+        if (swap == null) {
+            // An unset swap must not turn the memory limit into memory plus host swap.
+            value = "0";
+        } else if (swap.longValue() < 0) {
+            value = "max";
+        } else {
+            long swapOnly = swap.longValue() - limit;
+            if (swapOnly < 0) {
+                throw new IllegalArgumentException("memory swap is smaller than the memory limit");
+            }
+            value = Long.toString(swapOnly);
+        }
+        write(cgroup.resolve("memory.swap.max"), value);
     }
 
     private static void write(Path file, String value) throws IOException {

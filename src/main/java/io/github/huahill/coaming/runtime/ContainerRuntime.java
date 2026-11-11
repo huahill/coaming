@@ -177,6 +177,9 @@ public final class ContainerRuntime {
                 for (String readonly : config.readonlyPaths()) {
                     LinuxCalls.readonly(readonly);
                 }
+                if (config.rootReadonly()) {
+                    LinuxCalls.readonlyRoot();
+                }
             }
             if (createsNamespace(config, "uts")) {
                 LinuxCalls.hostname(config.hostname());

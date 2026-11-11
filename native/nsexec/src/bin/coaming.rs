@@ -166,6 +166,20 @@ mod linux {
             command.arg("--user");
             command.arg(user);
         }
+        if let Some(caps) = super::encode_capabilities(&spec) {
+            command.arg("--caps");
+            command.arg(caps);
+        }
+        if super::json_flag(&spec, "noNewPrivileges") {
+            command.arg("--no-new-privs");
+        }
+        let rules = super::seccomp_rules(&std::fs::read_to_string(state.join("config.json")).unwrap_or_default());
+        if !rules.is_empty() {
+            let path = state.join("seccomp.rules");
+            std::fs::write(&path, rules.join("\n") + "\n").unwrap_or_else(|error| fail(&format!("writing seccomp rules failed: {error}")));
+            command.arg("--seccomp");
+            command.arg(path);
+        }
         command.arg("--");
         command.args(args);
         let error = command.exec();
@@ -435,6 +449,217 @@ fn json_number_array(json: &str, key: &str) -> Vec<i64> {
         .collect()
 }
 
+
+const CAPABILITIES: &[&str] = &[
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETPCAP",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_ADMIN",
+    "CAP_NET_RAW",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_RAWIO",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_PACCT",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_NICE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_MKNOD",
+    "CAP_LEASE",
+    "CAP_AUDIT_WRITE",
+    "CAP_AUDIT_CONTROL",
+    "CAP_SETFCAP",
+    "CAP_MAC_OVERRIDE",
+    "CAP_MAC_ADMIN",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+    "CAP_BLOCK_SUSPEND",
+    "CAP_AUDIT_READ",
+    "CAP_PERFMON",
+    "CAP_BPF",
+];
+
+fn encode_capabilities(spec: &str) -> Option<String> {
+    let object = top_level_value(spec, "capabilities")?.trim().to_string();
+    if !object.starts_with('{') {
+        return None;
+    }
+    let sets = ["permitted", "inheritable", "effective", "bounding", "ambient"];
+    let encoded = sets
+        .iter()
+        .map(|name| format!("{:x}", capability_mask(&object, name)))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(encoded)
+}
+
+fn capability_mask(object: &str, key: &str) -> u64 {
+    let mut bits = 0u64;
+    for name in json_string_array(object, key) {
+        if let Some(index) = CAPABILITIES.iter().position(|item| *item == name) {
+            bits |= 1u64 << index;
+        }
+    }
+    bits
+}
+
+fn json_flag(json: &str, key: &str) -> bool {
+    top_level_value(json, key).is_some_and(|value| value.trim() == "true")
+}
+
+fn seccomp_rules(config: &str) -> Vec<String> {
+    let Some(profile) = find_json_value(config, "seccomp") else {
+        return Vec::new();
+    };
+    let profile = profile.trim();
+    if !profile.starts_with('{') {
+        return Vec::new();
+    }
+    let errno = json_number(profile, "errnoRet");
+    let Some(default_name) = json_string(profile, "defaultAction") else {
+        return Vec::new();
+    };
+    let mut rules = vec![format!("DEFAULT {}", seccomp_action(&default_name, errno))];
+    let Some(calls) = json_value(profile, "syscalls") else {
+        return rules;
+    };
+    for call in json_objects(calls.trim()) {
+        let call_errno = json_number(&call, "errnoRet").or(errno);
+        let Some(action_name) = json_string(&call, "action") else {
+            continue;
+        };
+        let action = seccomp_action(&action_name, call_errno);
+        let args = seccomp_args(&call);
+        for name in json_string_array(&call, "names") {
+            let mut line = format!("RULE {action} {name}");
+            for arg in &args {
+                line.push(' ');
+                line.push_str(arg);
+            }
+            rules.push(line);
+        }
+    }
+    rules
+}
+
+fn seccomp_args(call: &str) -> Vec<String> {
+    let Some(raw) = json_value(call, "args") else {
+        return Vec::new();
+    };
+    let mut encoded = Vec::new();
+    for arg in json_objects(raw.trim()) {
+        let index = json_number(&arg, "index").unwrap_or(0);
+        let op = json_string(&arg, "op").unwrap_or_default();
+        let value = json_number(&arg, "value").unwrap_or(0);
+        let value_two = json_number(&arg, "valueTwo").unwrap_or(0);
+        encoded.push(format!("{index} {} {value} {value_two}", seccomp_operation(&op)));
+    }
+    encoded
+}
+
+fn seccomp_action(name: &str, errno: Option<i64>) -> u32 {
+    match name {
+        "SCMP_ACT_ALLOW" => 0x7fff0000,
+        "SCMP_ACT_ERRNO" => 0x00050000 | ((errno.unwrap_or(1) as u32) & 0xffff),
+        "SCMP_ACT_KILL" | "SCMP_ACT_KILL_THREAD" => 0,
+        "SCMP_ACT_KILL_PROCESS" => 0x80000000,
+        "SCMP_ACT_TRAP" => 0x00030000,
+        "SCMP_ACT_LOG" => 0x7ffc0000,
+        "SCMP_ACT_NOTIFY" => 0x7fc00000,
+        _ => 0x7fff0000,
+    }
+}
+
+fn seccomp_operation(name: &str) -> u32 {
+    match name {
+        "SCMP_CMP_NE" => 1,
+        "SCMP_CMP_LT" => 2,
+        "SCMP_CMP_LE" => 3,
+        "SCMP_CMP_EQ" => 4,
+        "SCMP_CMP_GE" => 5,
+        "SCMP_CMP_GT" => 6,
+        "SCMP_CMP_MASKED_EQ" => 7,
+        _ => 4,
+    }
+}
+
+fn json_value(json: &str, key: &str) -> Option<String> {
+    top_level_value(json, key).map(|value| value.trim().to_string())
+}
+
+fn find_json_value(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let bytes = json.as_bytes();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' && json[index..].starts_with(&needle) {
+            let mut cursor = index + needle.len();
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b':' {
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                let end = value_end(json, cursor)?;
+                return Some(json[cursor..end].trim().to_string());
+            }
+        }
+        if byte == b'"' {
+            in_string = true;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn json_objects(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut objects = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'{' {
+            let Some(end) = value_end(value, index) else {
+                break;
+            };
+            objects.push(value[index..end].to_string());
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    objects
+}
+
 fn json_string(json: &str, key: &str) -> Option<String> {
     let raw = top_level_value(json, key)?;
     let raw = raw.trim();
@@ -569,24 +794,40 @@ fn parse_json_string(json: &str) -> Option<(String, usize)> {
         return None;
     }
     let mut value = String::new();
-    let mut escape = false;
-    for (offset, byte) in bytes.iter().enumerate().skip(1) {
-        if escape {
-            value.push(match byte {
-                b'"' => '"',
-                b'\\' => '\\',
-                b'n' => '\n',
-                b't' => '\t',
-                other => *other as char,
-            });
-            escape = false;
+    let mut index = 1usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'"' {
+            return Some((value, index + 1));
+        }
+        if byte != b'\\' {
+            value.push(byte as char);
+            index += 1;
             continue;
         }
-        match byte {
-            b'\\' => escape = true,
-            b'"' => return Some((value, offset + 1)),
-            _ => value.push(*byte as char),
+        index += 1;
+        if index >= bytes.len() {
+            return None;
         }
+        match bytes[index] {
+            b'"' => value.push('"'),
+            b'\\' => value.push('\\'),
+            b'/' => value.push('/'),
+            b'n' => value.push('\n'),
+            b'r' => value.push('\r'),
+            b't' => value.push('\t'),
+            b'u' => {
+                if index + 4 >= bytes.len() {
+                    return None;
+                }
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 5]).ok()?;
+                let code = u32::from_str_radix(hex, 16).ok()?;
+                value.push(char::from_u32(code)?);
+                index += 4;
+            }
+            other => value.push(other as char),
+        }
+        index += 1;
     }
     None
 }
@@ -631,7 +872,7 @@ fn signal_number(signal: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod signal_tests {
-    use super::{json_string, json_string_array, json_user, signal_number};
+    use super::{encode_capabilities, json_flag, json_string, json_string_array, json_user, seccomp_rules, signal_number};
 
     #[test]
     fn named_and_numeric_signals_match_the_runtime() {
@@ -654,10 +895,17 @@ mod signal_tests {
     fn exec_user_keeps_supplemental_groups() {
         let spec = r#"{"args":["id"],"user":{"uid":1001,"gid":1001,"additionalGids":[10,1234]}}"#;
         assert_eq!(json_user(spec).as_deref(), Some("1001:1001:10,1234"));
+        let caps = r#"{"capabilities":{"permitted":["CAP_CHOWN","CAP_NET_ADMIN"],"effective":["CAP_CHOWN"],"inheritable":[],"bounding":["CAP_CHOWN"],"ambient":[]},"noNewPrivileges":true}"#;
+        assert_eq!(encode_capabilities(caps).as_deref(), Some("1001,0,1,1,0"));
+        assert!(json_flag(caps, "noNewPrivileges"));
+        let config = r#"{"linux":{"seccomp":{"defaultAction":"SCMP_ACT_ERRNO","errnoRet":1,"syscalls":[{"names":["chmod"],"action":"SCMP_ACT_ERRNO","errnoRet":1}]}}}"#;
+        assert_eq!(seccomp_rules(config), vec!["DEFAULT 327681", "RULE 327681 chmod"]);
         let script = r#"{"args":["sh","-c","while [ ! -f /var/run/nginx.pid ]; do sleep 1; done"]}"#;
         assert_eq!(
             json_string_array(script, "args"),
             vec!["sh", "-c", "while [ ! -f /var/run/nginx.pid ]; do sleep 1; done"]
         );
+        let encoded = r#"{"args":["sh","-c","done\u0026\u0026 cat"]}"#;
+        assert_eq!(json_string_array(encoded, "args"), vec!["sh", "-c", "done&& cat"]);
     }
 }

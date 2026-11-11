@@ -128,6 +128,10 @@ final class LinuxCalls {
         return file.toString();
     }
 
+    static void readonlyRoot() {
+        check(mount(null, "/", null, MS_BIND | MS_REMOUNT | RDONLY, null), "readonly root");
+    }
+
     static void readonly(String path) {
         Path target = Path.of(path);
         if (!Files.exists(target)) {
