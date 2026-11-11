@@ -40,13 +40,13 @@ containerd 把 `BinaryName` 指到这个二进制，shim 仍是 `containerd-shim
 
 | 运行时 | 第 1 次 | 第 2 次 | 第 3 次 |
 | --- | --- | --- | --- |
-| coaming 0.1.0 | 47 ms，1308 KiB | 49 ms，1312 KiB | 47 ms，1304 KiB |
-| runc 1.4.2 | 23 ms，1304 KiB | 25 ms，1300 KiB | 29 ms，1300 KiB |
+| coaming 0.1.0 | 23 ms，1308 KiB | 24 ms，1308 KiB | 20 ms，1308 KiB |
+| runc 1.4.2 | 28 ms，1300 KiB | 24 ms，1300 KiB | 27 ms，1304 KiB |
 
 
 ## 安装
 
-`dev/package.sh` 把 `target/coaming` 打成 `coaming-<version>-linux-amd64.tar.gz`。版本号来自 `Coaming.VERSION`。
+`dev/package.sh` 把启动器和原生镜像打成 `coaming-<version>-linux-amd64.tar.gz`。版本号来自 `Coaming.VERSION`。`coaming` 是小启动器，`coaming-runtime` 是原生镜像，两个文件放在同一目录。
 
 containerd 把 `BinaryName` 指到解压出的 `coaming`，然后重启那个 containerd。shim 仍是 `containerd-shim-runc-v2`。cri-o 把 `runtime_path` 指到同一个二进制，然后重启 crio。
 

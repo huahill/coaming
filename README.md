@@ -40,13 +40,13 @@ Three samples on one cgroup v2 machine. The bundle is the same for both. The clo
 
 | runtime | sample 1 | sample 2 | sample 3 |
 | --- | --- | --- | --- |
-| coaming 0.1.0 | 47 ms, 1308 KiB | 49 ms, 1312 KiB | 47 ms, 1304 KiB |
-| runc 1.4.2 | 23 ms, 1304 KiB | 25 ms, 1300 KiB | 29 ms, 1300 KiB |
+| coaming 0.1.0 | 23 ms, 1308 KiB | 24 ms, 1308 KiB | 20 ms, 1308 KiB |
+| runc 1.4.2 | 28 ms, 1300 KiB | 24 ms, 1300 KiB | 27 ms, 1304 KiB |
 
 
 ## Install
 
-`dev/package.sh` packs `target/coaming` into `coaming-<version>-linux-amd64.tar.gz`. The version is `Coaming.VERSION`.
+`dev/package.sh` packs the launcher and the native image into `coaming-<version>-linux-amd64.tar.gz`. The version is `Coaming.VERSION`. `coaming` is the small launcher. `coaming-runtime` is the native image, and the two files stay in the same directory.
 
 Point containerd's `BinaryName` at the unpacked `coaming` and restart that containerd. The shim stays `containerd-shim-runc-v2`. Point cri-o's `runtime_path` at the same binary and restart crio.
 

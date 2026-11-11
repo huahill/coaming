@@ -51,6 +51,14 @@ unsafe extern "C" fn coaming_nsexec_init() {
     }
 }
 
+/// Keeps the early constructor linked into the small launcher.
+pub fn keep_early_init() {
+    #[cfg(target_os = "linux")]
+    {
+        std::hint::black_box(COAMING_EARLY_INIT as usize);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn first_argument() -> Option<String> {
     let data = std::fs::read("/proc/self/cmdline").unwrap_or_default();
@@ -162,13 +170,36 @@ fn enter_container() {
         if mount_join >= 0 {
             libc::close(mount_join);
         }
-        // A fresh exec maps the image clean. Returning here forks the
-        // native-image pages into copy-on-write and measured slower.
-        let mut argv: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
+        let image = image_for_child(&args[0]);
+        let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(args.len() + 1);
+        argv.push(image.as_ptr());
+        for arg in args.iter().skip(1) {
+            argv.push(arg.as_ptr());
+        }
         argv.push(std::ptr::null());
-        libc::execve(args[0].as_ptr(), argv.as_ptr(), environ());
+        libc::execve(image.as_ptr(), argv.as_ptr(), environ());
         libc::_exit(72);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn image_for_child(argv0: &std::ffi::CString) -> std::ffi::CString {
+    let Some(launcher) = std::env::var("COAMING_LAUNCHER").ok().filter(|value| !value.is_empty()) else {
+        return argv0.clone();
+    };
+    let Some(runtime) = std::env::var("COAMING_RUNTIME").ok().filter(|value| !value.is_empty()) else {
+        return argv0.clone();
+    };
+    let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
+        return argv0.clone();
+    };
+    let Ok(launcher_path) = std::fs::canonicalize(&launcher) else {
+        return argv0.clone();
+    };
+    if exe != launcher_path {
+        return argv0.clone();
+    }
+    std::ffi::CString::new(runtime).unwrap_or_else(|_| argv0.clone())
 }
 
 

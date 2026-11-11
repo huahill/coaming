@@ -213,10 +213,17 @@ public final class ContainerRuntime {
 
 
     private static String executableFor(Path state, long hostUid, long hostGid) throws Exception {
+        String launcher = executableLauncher();
         if (hostUid < 0 || hostGid < 0) {
+            if (launcher != null) {
+                return launcher;
+            }
             return Memfd.copyCurrentExecutable();
         }
         if (hostUid == Cgroups.euid(Files.readString(Path.of("/proc/self/status")))) {
+            if (launcher != null) {
+                return launcher;
+            }
             return Path.of("/proc/self/exe").toRealPath().toString();
         }
         Path copy = state.resolve("coaming");
@@ -240,6 +247,14 @@ public final class ContainerRuntime {
             }
         }
         return copy.toString();
+    }
+
+    private static String executableLauncher() {
+        String launcher = System.getenv("COAMING_LAUNCHER");
+        if (launcher == null || launcher.isBlank() || !Files.isExecutable(Path.of(launcher))) {
+            return null;
+        }
+        return launcher;
     }
 
     private static void applyResources(Path cgroup, io.github.huahill.coaming.json.Json resources) throws Exception {
