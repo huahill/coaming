@@ -150,6 +150,10 @@ final class LinuxCalls {
         check(mount(path, path, null, MS_BIND | 32 | 1, null), "readonly remount " + path);
     }
 
+    static void propagation(String target, long flags) {
+        check(mount(null, target, null, flags, null), "propagation " + target);
+    }
+
     static void mountPrepared(String source, String target, String fstype, long flags, long remount, long propagation, String data) {
         String payload = data == null || data.isEmpty() ? null : data;
         check(mount(source, target, fstype, flags, payload), "mount " + target);

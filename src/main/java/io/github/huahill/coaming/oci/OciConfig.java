@@ -10,10 +10,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks, Map<String, String> annotations) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks, Map<String, String> annotations, String rootfsPropagation) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
+        requireSupportedVersion(root);
         Json process = root.field("process");
         Json rootfs = root.field("root");
         List<Namespace> namespaces = new ArrayList<>();
@@ -127,7 +128,7 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
         boolean noNewPrivileges = process.optional("noNewPrivileges") != null && process.optional("noNewPrivileges").booleanValue();
         Integer oomScoreAdj = process.optional("oomScoreAdj") == null ? null : (int) process.optional("oomScoreAdj").longValue();
         Json resources = linux == null ? null : linux.optional("resources");
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root), readAnnotations(root));
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root), readAnnotations(root), rootfsPropagation(linux));
     }
 
 
@@ -145,7 +146,30 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
     private static final Set<String> HOOK_NAMES = Set.of(
             "prestart", "createRuntime", "createContainer", "startContainer", "poststart", "poststop");
 
+    private static void requireSupportedVersion(Json root) {
+        Json version = root.optional("ociVersion");
+        if (version == null) {
+            return;
+        }
+        String text = version.string();
+        if (!text.matches("1\\.\\d+\\.\\d+")) {
+            throw new IllegalArgumentException("unsupported ociVersion " + text);
+        }
+    }
+
+    private static String rootfsPropagation(Json linux) {
+        if (linux == null || linux.optional("rootfsPropagation") == null) {
+            return null;
+        }
+        String value = linux.optional("rootfsPropagation").string();
+        return switch (value) {
+            case "private", "rprivate", "shared", "rshared", "slave", "rslave", "unbindable", "runbindable" -> value;
+            default -> throw new IllegalArgumentException("unsupported rootfs propagation " + value);
+        };
+    }
+
     private static Map<String, String> readAnnotations(Json root) {
+
         Json value = root.optional("annotations");
         if (!(value instanceof Json.Obj obj)) {
             return Map.of();

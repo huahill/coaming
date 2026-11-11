@@ -320,6 +320,24 @@ class OciConfigTest {
         assertEquals("hook stdin test", OciConfig.read(bundle).annotations().get("org.opencontainers.runtime-tools"));
     }
 
+    @Test
+    void rejectsAnUnknownRuntimeSpecVersion() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {"ociVersion":"invalid","process":{"args":["/bin/true"]},"root":{"path":"rootfs"}}
+                """);
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () -> OciConfig.read(bundle));
+        assertTrue(failure.getMessage().contains("ociVersion"));
+    }
+
+    @Test
+    void rejectsAnUnknownRlimit() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {"process":{"args":["/bin/true"],"rlimits":[{"type":"RLIMIT_TEST","soft":1,"hard":1}]},"root":{"path":"rootfs"}}
+                """);
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () -> OciConfig.read(bundle));
+        assertTrue(failure.getMessage().contains("RLIMIT_TEST"));
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

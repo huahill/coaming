@@ -98,6 +98,9 @@ fn enter_container() {
     let mut flags: libc::c_int = 0;
     let mut new_pid = false;
     for kind in &unshare {
+        if kind == "none" {
+            continue;
+        }
         if kind == "pid" {
             new_pid = true;
             continue;
@@ -131,7 +134,7 @@ fn enter_container() {
                 mount_join = fd;
                 continue;
             }
-            if libc::setns(fd, 0) != 0 {
+            if libc::setns(fd, clone_flag(&kind)) != 0 {
                 libc::_exit(88);
             }
             libc::close(fd);
@@ -139,7 +142,7 @@ fn enter_container() {
         if new_pid && libc::unshare(libc::CLONE_NEWPID) != 0 {
             libc::_exit(70);
         }
-        if pid_join >= 0 && libc::setns(pid_join, 0) != 0 {
+        if pid_join >= 0 && libc::setns(pid_join, libc::CLONE_NEWPID) != 0 {
             libc::_exit(88);
         }
         if pid_join >= 0 {
@@ -153,7 +156,7 @@ fn enter_container() {
             write_pid(&pid_path, pid);
             libc::_exit(0);
         }
-        if mount_join >= 0 && libc::setns(mount_join, 0) != 0 {
+        if mount_join >= 0 && libc::setns(mount_join, libc::CLONE_NEWNS) != 0 {
             libc::_exit(88);
         }
         if mount_join >= 0 {
@@ -212,14 +215,13 @@ fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
     }
     // mount_setattr rejects MS_REC in the propagation field. Recursion is AT_RECURSIVE.
     let mut setattr_flags = libc::AT_EMPTY_PATH;
-    let propagation = mount.propagation & !16384;
     if mount.recursive {
         setattr_flags |= libc::AT_RECURSIVE;
     }
     let attr = MountAttr {
         attr_set: mount.attr_set,
         attr_clr: 0,
-        propagation,
+        propagation: 0,
         userns_fd: 0,
     };
     let empty = std::ffi::CString::new("").unwrap();
@@ -386,6 +388,7 @@ struct IdmapRequest {
 }
 
 #[cfg(target_os = "linux")]
+#[repr(C)]
 #[repr(C)]
 struct MountAttr {
     attr_set: u64,

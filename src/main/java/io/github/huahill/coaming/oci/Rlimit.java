@@ -12,7 +12,9 @@ public record Rlimit(String type, long soft, long hard) {
         }
         List<Rlimit> parsed = new ArrayList<>();
         for (Json limit : limits.items()) {
-            parsed.add(new Rlimit(limit.field("type").string(), limit.field("soft").longValue(), limit.field("hard").longValue()));
+            Rlimit parsedLimit = new Rlimit(limit.field("type").string(), limit.field("soft").longValue(), limit.field("hard").longValue());
+            parsedLimit.resource();
+            parsed.add(parsedLimit);
         }
         return List.copyOf(parsed);
     }

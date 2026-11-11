@@ -44,6 +44,7 @@ public final class ContainerRuntime {
             DevicePolicy.requireEnforceable(config.deviceRules());
         }
         Files.createDirectories(state);
+        Files.copy(bundle.resolve("config.json"), state.resolve("config.json"));
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
         LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
@@ -133,6 +134,9 @@ public final class ContainerRuntime {
         Files.createDirectories(oldRoot);
         LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
         LinuxCalls.chdir("/");
+        if (config.rootfsPropagation() != null) {
+            LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
+        }
         LinuxCalls.umountDetach("/oldroot");
         if (!mountsProc) {
             LinuxCalls.mountProc("/proc");
@@ -268,6 +272,9 @@ public final class ContainerRuntime {
         Integer preparedBind = binds.get(mount.destination());
         if (preparedBind != null) {
             LinuxCalls.moveMount(preparedBind, dest.toString());
+            if (prepared.propagation() != 0) {
+                LinuxCalls.propagation(dest.toString(), prepared.propagation());
+            }
             return;
         }
         LinuxCalls.mountPrepared(prepared.source(), dest.toString(), prepared.fstype(), prepared.flags(), prepared.remount(), prepared.propagation(), prepared.data());
@@ -334,8 +341,8 @@ public final class ContainerRuntime {
         LinuxCalls.waitUntilExec(state.resolve("exec.fifo").toString());
         Files.writeString(state.resolve("status"), "running");
         String bundle = text(state.resolve("bundle"));
-        if (!bundle.isEmpty() && Files.exists(Path.of(bundle).resolve("config.json"))) {
-            OciConfig config = OciConfig.read(Path.of(bundle));
+        if (Files.exists(state.resolve("config.json"))) {
+            OciConfig config = OciConfig.read(state);
             String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
             runHooks(config, "poststart", hookState(config, id, "running", pid, bundle));
         }
@@ -379,8 +386,13 @@ public final class ContainerRuntime {
             return 0;
         }
         String status = Files.readString(state.resolve("status")).trim();
-        if (!force && "running".equals(status) && processAlive(state)) {
-            throw new IllegalStateException("container is running: " + id);
+        boolean alive = Files.exists(state.resolve("pid")) && processAlive(state);
+        if (!deletionIsAllowed(status, alive, force)) {
+            throw new IllegalStateException("container is not stopped: " + id);
+        }
+        if (!alive && ("running".equals(status) || "created".equals(status))) {
+            status = "stopped";
+            Files.writeString(state.resolve("status"), status);
         }
         if (force || "created".equals(status) || "running".equals(status)) {
             signalCreatedOrForced(root, id, state);
@@ -594,6 +606,13 @@ public final class ContainerRuntime {
         } catch (IOException failure) {
             throw new IllegalStateException("symlink " + path + " failed", failure);
         }
+    }
+
+    static boolean deletionIsAllowed(String status, boolean alive, boolean force) {
+        if (force || !alive) {
+            return true;
+        }
+        return "stopped".equals(status);
     }
 
     private static void runHooks(OciConfig config, String name, Map<String, String> state) {

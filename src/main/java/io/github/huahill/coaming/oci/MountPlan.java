@@ -23,6 +23,20 @@ public final class MountPlan {
 
     public enum Idmap { NONE, MOUNT, RECURSIVE }
 
+    public static long propagation(String name) {
+        return switch (name) {
+            case "private" -> PRIVATE;
+            case "rprivate" -> REC | PRIVATE;
+            case "shared" -> SHARED;
+            case "rshared" -> REC | SHARED;
+            case "slave" -> SLAVE;
+            case "rslave" -> REC | SLAVE;
+            case "unbindable" -> UNBINDABLE;
+            case "runbindable" -> REC | UNBINDABLE;
+            default -> throw new IllegalArgumentException("unsupported rootfs propagation " + name);
+        };
+    }
+
     private MountPlan() {}
 
     public record Prepared(String source, String fstype, long flags, long remount, long propagation, String data, Idmap idmap) {}
