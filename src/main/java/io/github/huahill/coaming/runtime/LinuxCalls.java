@@ -539,6 +539,10 @@ final class LinuxCalls {
 
 
     static void createDevice(String path, String type, long major, long minor, int fileMode) {
+        createDevice(path, path, type, major, minor, fileMode);
+    }
+
+    static void createDevice(String path, String hostSource, String type, long major, long minor, int fileMode) {
         int kind = switch (type) {
             case "c", "u" -> 8192;
             case "b" -> 24576;
@@ -562,14 +566,12 @@ final class LinuxCalls {
             if (rc == 0 || errno() == 17) {
                 return;
             }
-            if (errno() == 1) {
-                String host = "/oldroot" + path;
-                if (Files.exists(Path.of(host))) {
-                    check(mount(host, path, null, MS_BIND, null), "bind device " + path);
-                    return;
-                }
+            int error = errno();
+            if (error == 1 && Files.exists(Path.of(hostSource))) {
+                check(mount(hostSource, path, null, MS_BIND, null), "bind device " + path);
+                return;
             }
-            throw new IllegalStateException("mknod " + path + " failed: " + errno());
+            throw new IllegalStateException("mknod " + path + " failed: " + error);
         } catch (RuntimeException failure) {
             throw failure;
         } catch (Throwable failure) {

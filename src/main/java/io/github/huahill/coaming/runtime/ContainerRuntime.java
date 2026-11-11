@@ -130,15 +130,19 @@ public final class ContainerRuntime {
                 LinuxCalls.closeFd(descriptor);
             }
         }
+        for (DeviceNode device : config.devices()) {
+            if (!device.path().startsWith("/")) {
+                throw new IllegalArgumentException("device path must be absolute");
+            }
+            Path target = rootfs.resolve(device.path().substring(1));
+            LinuxCalls.createDevice(target.toString(), device.path(), device.type(), device.major(), device.minor(), device.fileMode());
+        }
         Path oldRoot = rootfs.resolve("oldroot");
         Files.createDirectories(oldRoot);
         LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
         LinuxCalls.chdir("/");
         if (config.rootfsPropagation() != null) {
             LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
-        }
-        for (DeviceNode device : config.devices()) {
-            LinuxCalls.createDevice(device.path(), device.type(), device.major(), device.minor(), device.fileMode());
         }
         LinuxCalls.umountDetach("/oldroot");
         if (!mountsProc) {
