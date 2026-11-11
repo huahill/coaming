@@ -47,9 +47,7 @@ public final class ContainerRuntime {
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
         LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
-        if (!config.hooks().getOrDefault("poststart", List.of()).isEmpty()) {
-            LinuxCalls.mkfifo(state.resolve("exec.fifo").toString());
-        }
+        LinuxCalls.mkfifo(state.resolve("exec.fifo").toString());
         long hostUid = IdMap.hostIdFor(config.uidMappings(), 0);
         long hostGid = IdMap.hostIdFor(config.gidMappings(), 0);
         String cgroup = null;
@@ -98,7 +96,7 @@ public final class ContainerRuntime {
             applyResources(Path.of(cgroup), config.resources());
         }
         waitUntil(state, "created", "failed");
-        Map<String, String> created = hookState(id, "created", Integer.toString(pid), bundle.toAbsolutePath().toString());
+        Map<String, String> created = hookState(config, id, "created", Integer.toString(pid), bundle.toAbsolutePath().toString());
         runHooks(config, "createRuntime", created);
         runHooks(config, "prestart", created);
         return 0;
@@ -113,11 +111,7 @@ public final class ContainerRuntime {
         int startFd = LinuxCalls.openStartFifo(state.resolve("start.fifo").toString());
         Files.writeString(state.resolve("status"), "created");
         LinuxCalls.readStartByte(startFd);
-        int execFd = -1;
-        if (!config.hooks().getOrDefault("poststart", List.of()).isEmpty()) {
-            execFd = LinuxCalls.openExecFifo(state.resolve("exec.fifo").toString());
-        }
-        Files.writeString(state.resolve("status"), "running");
+        int execFd = LinuxCalls.openExecFifo(state.resolve("exec.fifo").toString());
         Path rootfs = config.root(bundle).toAbsolutePath();
         LinuxCalls.bindPrivate(rootfs.toString());
         boolean mountsProc = false;
@@ -146,6 +140,7 @@ public final class ContainerRuntime {
         for (DeviceNode device : config.devices()) {
             LinuxCalls.createDevice(device.path(), device.type(), device.major(), device.minor(), device.fileMode());
         }
+        defaultDeviceSymlinks();
         for (String masked : config.maskedPaths()) {
             LinuxCalls.mask(masked);
         }
@@ -156,7 +151,7 @@ public final class ContainerRuntime {
         if (!"/".equals(config.cwd())) {
             LinuxCalls.chdir(config.cwd());
         }
-        runHooks(config, "createContainer", hookState(hookId, "running", hookPid, hookBundle));
+        runHooks(config, "createContainer", hookState(config, hookId, "running", hookPid, hookBundle));
         String[] args = config.args().toArray(String[]::new);
         if (args.length == 0) {
             throw new IllegalStateException("container has no process args");
@@ -178,7 +173,7 @@ public final class ContainerRuntime {
         if (config.seccomp() != null) {
             LinuxCalls.installSeccomp(config.seccomp());
         }
-        runHooks(config, "startContainer", hookState(hookId, "running", hookPid, hookBundle));
+        runHooks(config, "startContainer", hookState(config, hookId, "running", hookPid, hookBundle));
         try {
             LinuxCalls.exec(args, config.env().toArray(String[]::new));
         } catch (RuntimeException failure) {
@@ -336,14 +331,13 @@ public final class ContainerRuntime {
         requireLinux();
         Path state = requireContainer(root, id);
         LinuxCalls.signalStart(state.resolve("start.fifo").toString());
+        LinuxCalls.waitUntilExec(state.resolve("exec.fifo").toString());
+        Files.writeString(state.resolve("status"), "running");
         String bundle = text(state.resolve("bundle"));
         if (!bundle.isEmpty() && Files.exists(Path.of(bundle).resolve("config.json"))) {
             OciConfig config = OciConfig.read(Path.of(bundle));
-            if (!config.hooks().getOrDefault("poststart", List.of()).isEmpty()) {
-                LinuxCalls.waitUntilExec(state.resolve("exec.fifo").toString());
-                String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
-                runHooks(config, "poststart", hookState(id, "running", pid, bundle));
-            }
+            String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
+            runHooks(config, "poststart", hookState(config, id, "running", pid, bundle));
         }
         return 0;
     }
@@ -375,7 +369,7 @@ public final class ContainerRuntime {
     public static int kill(Path root, String id, String signal) throws IOException {
         requireLinux();
         int pid = Integer.parseInt(Files.readString(requireContainer(root, id).resolve("pid")).trim());
-        LinuxCalls.kill(pid, signalNumber(signal));
+        LinuxCalls.kill(pid, Signals.number(signal));
         return 0;
     }
 
@@ -404,7 +398,7 @@ public final class ContainerRuntime {
         if (!bundle.isEmpty() && Files.exists(Path.of(bundle).resolve("config.json"))) {
             OciConfig config = OciConfig.read(Path.of(bundle));
             String pid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
-            runHooks(config, "poststop", hookState(id, "stopped", pid, bundle));
+            runHooks(config, "poststop", hookState(config, id, "stopped", pid, bundle));
         }
         deleteTree(state);
         return 0;
@@ -570,14 +564,6 @@ public final class ContainerRuntime {
         return state;
     }
 
-    private static int signalNumber(String signal) {
-        return switch (signal.toUpperCase(Locale.ROOT)) {
-            case "TERM", "SIGTERM", "15" -> 15;
-            case "KILL", "SIGKILL", "9" -> 9;
-            default -> Integer.parseInt(signal);
-        };
-    }
-
     private static void requireLinux() {
         if (!linuxHost()) {
             throw new IllegalStateException("container commands require Linux");
@@ -588,6 +574,28 @@ public final class ContainerRuntime {
         return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux");
     }
 
+    private static void defaultDeviceSymlinks() {
+        symlink("/dev/fd", "/proc/self/fd");
+        symlink("/dev/stdin", "/proc/self/fd/0");
+        symlink("/dev/stdout", "/proc/self/fd/1");
+        symlink("/dev/stderr", "/proc/self/fd/2");
+    }
+
+    private static void symlink(String path, String target) {
+        Path file = Path.of(path);
+        if (Files.exists(file)) {
+            return;
+        }
+        try {
+            if (file.getParent() != null) {
+                Files.createDirectories(file.getParent());
+            }
+            Files.createSymbolicLink(file, Path.of(target));
+        } catch (IOException failure) {
+            throw new IllegalStateException("symlink " + path + " failed", failure);
+        }
+    }
+
     private static void runHooks(OciConfig config, String name, Map<String, String> state) {
         List<OciHook> hooks = config.hooks().getOrDefault(name, List.of());
         if (hooks.isEmpty()) {
@@ -596,14 +604,29 @@ public final class ContainerRuntime {
         new HookRunner(HookRunner::spawn).run(hooks, state);
     }
 
-    private static Map<String, String> hookState(String id, String status, String pid, String bundle) {
+    private static Map<String, String> hookState(OciConfig config, String id, String status, String pid, String bundle) {
         Map<String, String> state = new LinkedHashMap<>();
         state.put("ociVersion", "1.2.0");
         state.put("id", id);
         state.put("status", status);
         state.put("pid", pid);
         state.put("bundle", bundle);
+        state.put("annotations", annotationsJson(config.annotations()));
         return state;
+    }
+
+    private static String annotationsJson(Map<String, String> annotations) {
+        StringBuilder json = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : annotations.entrySet()) {
+            if (!first) {
+                json.append(',');
+            }
+            first = false;
+            json.append('"').append(escape(entry.getKey())).append('"').append(':');
+            json.append('"').append(escape(entry.getValue())).append('"');
+        }
+        return json.append('}').toString();
     }
 
     private static void deleteTree(Path path) throws IOException {

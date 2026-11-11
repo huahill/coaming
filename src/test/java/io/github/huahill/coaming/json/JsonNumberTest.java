@@ -12,4 +12,9 @@ class JsonNumberTest {
         assertEquals(-1, value.field("limit").longValue());
         assertEquals(1024, value.field("shares").longValue());
     }
+
+    @Test
+    void decodesUnicodeEscapes() {
+        assertEquals(">", Json.parse("\"\\u003e\"").string());
+    }
 }

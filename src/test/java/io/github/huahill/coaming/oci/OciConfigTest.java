@@ -295,6 +295,31 @@ class OciConfigTest {
         assertEquals(0x00050000 | 13, profile.syscalls().getFirst().action());
     }
 
+    @Test
+    void createsTheDefaultDevicesWhenNoneAreConfigured() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"}
+                }
+                """);
+        OciConfig config = OciConfig.read(bundle);
+        assertEquals("/dev/null", config.devices().getFirst().path());
+        assertEquals("/dev/ptmx", config.devices().getLast().path());
+    }
+
+    @Test
+    void readsAnnotations() throws Exception {
+        Files.writeString(bundle.resolve("config.json"), """
+                {
+                  "process": {"args": ["/bin/true"]},
+                  "root": {"path": "rootfs"},
+                  "annotations": {"org.opencontainers.runtime-tools": "hook stdin test"}
+                }
+                """);
+        assertEquals("hook stdin test", OciConfig.read(bundle).annotations().get("org.opencontainers.runtime-tools"));
+    }
+
     private static java.util.List<String> ListOf(String... values) {
         return java.util.List.of(values);
     }

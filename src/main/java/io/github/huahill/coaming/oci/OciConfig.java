@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks) {
+public record OciConfig(List<String> args, String cwd, String rootPath, String hostname, List<Namespace> namespaces, boolean namespacesSpecified, List<String> env, List<OciMount> mounts, List<String> maskedPaths, List<String> readonlyPaths, List<DeviceNode> devices, List<DeviceRule> deviceRules, SeccompProfile seccomp, String cgroupsPath, LinuxCapabilities capabilities, boolean noNewPrivileges, ProcessUser user, List<Rlimit> rlimits, Integer oomScoreAdj, Json resources, String apparmorProfile, List<IdMap> uidMappings, List<IdMap> gidMappings, Map<String, List<OciHook>> hooks, Map<String, String> annotations) {
     public static OciConfig read(Path bundle) throws IOException {
         String text = Files.readString(bundle.resolve("config.json"));
         Json root = Json.parse(text);
@@ -87,11 +87,13 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
             cgroupsPath = linux.optional("cgroupsPath").string();
         }
         List<DeviceNode> devices = new ArrayList<>();
+        boolean devicesSpecified = false;
         List<DeviceRule> deviceRules = new ArrayList<>();
         SeccompProfile seccomp = null;
         if (linux != null) {
             Json deviceValues = linux.optional("devices");
             if (deviceValues instanceof Json.Arr arr) {
+                devicesSpecified = true;
                 for (Json item : arr.items()) {
                     int mode = 438;
                     Json modeValue = item.optional("fileMode");
@@ -117,19 +119,46 @@ public record OciConfig(List<String> args, String cwd, String rootPath, String h
                 seccomp = SeccompProfile.parse(linux.optional("seccomp"));
             }
         }
+        if (!devicesSpecified) {
+            devices.addAll(defaultDevices());
+        }
         rejectUnsupportedProfiles(process);
         LinuxCapabilities capabilities = LinuxCapabilities.from(process.optional("capabilities"));
         boolean noNewPrivileges = process.optional("noNewPrivileges") != null && process.optional("noNewPrivileges").booleanValue();
         Integer oomScoreAdj = process.optional("oomScoreAdj") == null ? null : (int) process.optional("oomScoreAdj").longValue();
         Json resources = linux == null ? null : linux.optional("resources");
-        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root));
+        return new OciConfig(process.field("args").strings(), cwd, rootfs.field("path").string(), hostname, namespaces, namespacesSpecified, env, List.copyOf(mounts), maskedPaths, readonlyPaths, List.copyOf(devices), List.copyOf(deviceRules), seccomp, cgroupsPath, capabilities, noNewPrivileges, ProcessUser.from(process), Rlimit.list(process), oomScoreAdj, resources, apparmorProfile(process), IdMap.list(linux, "uidMappings"), IdMap.list(linux, "gidMappings"), readHooks(root), readAnnotations(root));
     }
 
+
+    private static List<DeviceNode> defaultDevices() {
+        return List.of(
+                new DeviceNode("/dev/null", "c", 1, 3, 438, 0, 0),
+                new DeviceNode("/dev/zero", "c", 1, 5, 438, 0, 0),
+                new DeviceNode("/dev/full", "c", 1, 7, 438, 0, 0),
+                new DeviceNode("/dev/random", "c", 1, 8, 438, 0, 0),
+                new DeviceNode("/dev/urandom", "c", 1, 9, 438, 0, 0),
+                new DeviceNode("/dev/tty", "c", 5, 0, 438, 0, 0),
+                new DeviceNode("/dev/ptmx", "c", 5, 2, 438, 0, 0));
+    }
 
     private static final Set<String> HOOK_NAMES = Set.of(
             "prestart", "createRuntime", "createContainer", "startContainer", "poststart", "poststop");
 
+    private static Map<String, String> readAnnotations(Json root) {
+        Json value = root.optional("annotations");
+        if (!(value instanceof Json.Obj obj)) {
+            return Map.of();
+        }
+        Map<String, String> annotations = new LinkedHashMap<>();
+        for (Map.Entry<String, Json> entry : obj.fields().entrySet()) {
+            annotations.put(entry.getKey(), entry.getValue().string());
+        }
+        return Map.copyOf(annotations);
+    }
+
     private static Map<String, List<OciHook>> readHooks(Json root) {
+
         Json value = root.optional("hooks");
         if (!(value instanceof Json.Obj obj)) {
             return Map.of();

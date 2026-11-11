@@ -79,7 +79,7 @@ public final class HookRunner {
             }
             first = false;
             json.append('"').append(escape(entry.getKey())).append('"').append(':');
-            if ("pid".equals(entry.getKey())) {
+            if ("pid".equals(entry.getKey()) || "annotations".equals(entry.getKey())) {
                 json.append(entry.getValue());
             } else {
                 json.append('"').append(escape(entry.getValue())).append('"');

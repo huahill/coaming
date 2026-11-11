@@ -192,6 +192,8 @@ public sealed interface Json {
                         case '"', '\\', '/' -> escaped;
                         case 'n' -> '\n';
                         case 't' -> '\t';
+                        case 'r' -> '\r';
+                        case 'u' -> unicodeEscape();
                         default -> escaped;
                     });
                 } else {
@@ -199,6 +201,21 @@ public sealed interface Json {
                 }
             }
             throw new IllegalArgumentException("unterminated string");
+        }
+
+        private char unicodeEscape() {
+            int code = 0;
+            for (int i = 0; i < 4; i++) {
+                if (done()) {
+                    throw new IllegalArgumentException("short unicode escape");
+                }
+                int digit = Character.digit(text.charAt(index++), 16);
+                if (digit < 0) {
+                    throw new IllegalArgumentException("bad unicode escape");
+                }
+                code = (code << 4) + digit;
+            }
+            return (char) code;
         }
 
         private void skipLiteral() {
