@@ -34,6 +34,16 @@ cgroup v2 only. `coaming features` reports `cgroup.v1` false and `systemdUser` f
 
 containerd sets `BinaryName` to this binary and keeps the shim `containerd-shim-runc-v2`. cri-o sets `runtime_path` to this binary.
 
+## Comparison
+
+Three samples on one cgroup v2 machine. The bundle is the same for both. The clock starts at `create` and stops when `start` returns, which is after `/bin/sleep` has been entered. RSS is that process's `VmRSS`.
+
+| runtime | sample 1 | sample 2 | sample 3 |
+| --- | --- | --- | --- |
+| coaming 0.1.0 | 47 ms, 1308 KiB | 49 ms, 1312 KiB | 47 ms, 1304 KiB |
+| runc 1.4.2 | 23 ms, 1304 KiB | 25 ms, 1300 KiB | 29 ms, 1300 KiB |
+
+
 ## License
 
 [Apache-2.0](LICENSE)
