@@ -567,8 +567,8 @@ final class LinuxCalls {
                 return;
             }
             int error = errno();
-            if (error == 1 && Files.exists(Path.of(hostSource))) {
-                check(mount(hostSource, path, null, MS_BIND, null), "bind device " + path);
+            if (error == 1 && !hostSource.equals(path)) {
+                check(mount(hostSource, path, null, MS_BIND, null), "bind device " + hostSource + " onto " + path);
                 return;
             }
             throw new IllegalStateException("mknod " + path + " failed: " + error);
