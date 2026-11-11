@@ -47,8 +47,9 @@ public final class ContainerRuntime {
         Files.copy(bundle.resolve("config.json"), state.resolve("config.json"));
         Files.writeString(state.resolve("bundle"), bundle.toAbsolutePath().toString());
         Files.writeString(state.resolve("status"), "creating");
-        LinuxCalls.mkfifo(state.resolve("start.fifo").toString());
-        LinuxCalls.mkfifo(state.resolve("exec.fifo").toString());
+        RuntimeFifo.mkfifo(state.resolve("start.fifo").toString());
+        RuntimeFifo.mkfifo(state.resolve("exec.fifo").toString());
+        RuntimeFifo.mkfifo(state.resolve("created.fifo").toString());
         long hostUid = IdMap.hostIdFor(config.uidMappings(), 0);
         long hostGid = IdMap.hostIdFor(config.gidMappings(), 0);
         String cgroup = null;
@@ -96,7 +97,14 @@ public final class ContainerRuntime {
         if (config.resources() != null) {
             applyResources(Path.of(cgroup), config.resources());
         }
-        waitUntil(state, "created", "failed");
+        RuntimeFifo.awaitCreated(state.resolve("created.fifo").toString());
+        String createdStatus = Files.readString(state.resolve("status")).trim();
+        if ("failed".equals(createdStatus)) {
+            throw new IllegalStateException("container init failed");
+        }
+        if (!"created".equals(createdStatus)) {
+            throw new IllegalStateException("timed out waiting for container creation");
+        }
         Map<String, String> created = hookState(config, id, "created", Integer.toString(pid), bundle.toAbsolutePath().toString());
         runHooks(config, "createRuntime", created);
         runHooks(config, "prestart", created);
@@ -104,93 +112,103 @@ public final class ContainerRuntime {
     }
 
     public static int init(Path state, Path bundle) throws Exception {
-        OciConfig config = OciConfig.read(bundle);
-        String hookId = state.getFileName().toString();
-        String hookPid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
-        String hookBundle = bundle.toAbsolutePath().toString();
-        recordExecutable(state);
-        int startFd = LinuxCalls.openStartFifo(state.resolve("start.fifo").toString());
-        Files.writeString(state.resolve("status"), "created");
-        LinuxCalls.readStartByte(startFd);
-        int execFd = LinuxCalls.openExecFifo(state.resolve("exec.fifo").toString());
-        Path rootfs = config.root(bundle).toAbsolutePath();
-        LinuxCalls.bindPrivate(rootfs.toString());
-        boolean mountsProc = false;
-        java.util.Map<String, Integer> idmaps = IdmapPlan.descriptors(System::getenv);
-        java.util.Map<String, Integer> binds = BindFds.descriptors(System::getenv);
+        boolean announced = false;
         try {
-            for (OciMount mount : config.mounts()) {
-                if ("/proc".equals(mount.destination())) {
-                    mountsProc = true;
+            OciConfig config = OciConfig.read(bundle);
+            String hookId = state.getFileName().toString();
+            String hookPid = Files.exists(state.resolve("pid")) ? Files.readString(state.resolve("pid")).trim() : "0";
+            String hookBundle = bundle.toAbsolutePath().toString();
+            recordExecutable(state);
+            int startFd = RuntimeFifo.openStartFifo(state.resolve("start.fifo").toString());
+            Files.writeString(state.resolve("status"), "created");
+            RuntimeFifo.signal(state.resolve("created.fifo").toString());
+            announced = true;
+            RuntimeFifo.readStartByte(startFd);
+            int execFd = RuntimeFifo.openExecFifo(state.resolve("exec.fifo").toString());
+            Path rootfs = config.root(bundle).toAbsolutePath();
+            LinuxCalls.bindPrivate(rootfs.toString());
+            boolean mountsProc = false;
+            java.util.Map<String, Integer> idmaps = IdmapPlan.descriptors(System::getenv);
+            java.util.Map<String, Integer> binds = BindFds.descriptors(System::getenv);
+            try {
+                for (OciMount mount : config.mounts()) {
+                    if ("/proc".equals(mount.destination())) {
+                        mountsProc = true;
+                    }
+                    mountOne(rootfs, mount, idmaps, binds);
                 }
-                mountOne(rootfs, mount, idmaps, binds);
+            } finally {
+                for (int descriptor : binds.values()) {
+                    LinuxCalls.closeFd(descriptor);
+                }
             }
-        } finally {
-            for (int descriptor : binds.values()) {
-                LinuxCalls.closeFd(descriptor);
+            for (DeviceNode device : config.devices()) {
+                if (!device.path().startsWith("/")) {
+                    throw new IllegalArgumentException("device path must be absolute");
+                }
+                Path target = rootfs.resolve(device.path().substring(1));
+                LinuxCalls.createDevice(target.toString(), device.path(), device.type(), device.major(), device.minor(), device.fileMode());
             }
-        }
-        for (DeviceNode device : config.devices()) {
-            if (!device.path().startsWith("/")) {
-                throw new IllegalArgumentException("device path must be absolute");
+            Path oldRoot = rootfs.resolve("oldroot");
+            Files.createDirectories(oldRoot);
+            LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
+            LinuxCalls.chdir("/");
+            if (config.rootfsPropagation() != null) {
+                LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
             }
-            Path target = rootfs.resolve(device.path().substring(1));
-            LinuxCalls.createDevice(target.toString(), device.path(), device.type(), device.major(), device.minor(), device.fileMode());
-        }
-        Path oldRoot = rootfs.resolve("oldroot");
-        Files.createDirectories(oldRoot);
-        LinuxCalls.pivotRoot(rootfs.toString(), oldRoot.toString());
-        LinuxCalls.chdir("/");
-        if (config.rootfsPropagation() != null) {
-            LinuxCalls.propagation("/", MountPlan.propagation(config.rootfsPropagation()));
-        }
-        LinuxCalls.umountDetach("/oldroot");
-        if (!mountsProc) {
-            LinuxCalls.mountProc("/proc");
-        }
-        defaultDeviceSymlinks();
-        for (String masked : config.maskedPaths()) {
-            LinuxCalls.mask(masked);
-        }
-        for (String readonly : config.readonlyPaths()) {
-            LinuxCalls.readonly(readonly);
-        }
-        LinuxCalls.hostname(config.hostname());
-        if (!"/".equals(config.cwd())) {
-            LinuxCalls.chdir(config.cwd());
-        }
-        runHooks(config, "createContainer", hookState(config, hookId, "running", hookPid, hookBundle));
-        String[] args = config.args().toArray(String[]::new);
-        if (args.length == 0) {
-            throw new IllegalStateException("container has no process args");
-        }
-        args[0] = resolveProgram(args[0], config.env());
-        if (config.apparmorProfile() != null) {
-            LinuxCalls.setApparmor(config.apparmorProfile());
-        }
-        if (config.capabilities() != null) {
-            LinuxCalls.dropBounding(config.capabilities());
-        }
-        LinuxCalls.applyIdentity(config.user(), config.rlimits(), config.oomScoreAdj(), config.capabilities() != null);
-        if (config.capabilities() != null) {
-            LinuxCalls.commitCapabilities(config.capabilities());
-        }
-        if (config.noNewPrivileges()) {
-            LinuxCalls.noNewPrivileges();
-        }
-        if (config.seccomp() != null) {
-            LinuxCalls.installSeccomp(config.seccomp());
-        }
-        runHooks(config, "startContainer", hookState(config, hookId, "running", hookPid, hookBundle));
-        try {
-            LinuxCalls.exec(args, config.env().toArray(String[]::new));
-        } catch (RuntimeException failure) {
-            if (execFd >= 0) {
-                LinuxCalls.signalExecFailed(execFd);
+            LinuxCalls.umountDetach("/oldroot");
+            if (!mountsProc) {
+                LinuxCalls.mountProc("/proc");
+            }
+            defaultDeviceSymlinks();
+            for (String masked : config.maskedPaths()) {
+                LinuxCalls.mask(masked);
+            }
+            for (String readonly : config.readonlyPaths()) {
+                LinuxCalls.readonly(readonly);
+            }
+            LinuxCalls.hostname(config.hostname());
+            if (!"/".equals(config.cwd())) {
+                LinuxCalls.chdir(config.cwd());
+            }
+            runHooks(config, "createContainer", hookState(config, hookId, "running", hookPid, hookBundle));
+            String[] args = config.args().toArray(String[]::new);
+            if (args.length == 0) {
+                throw new IllegalStateException("container has no process args");
+            }
+            args[0] = resolveProgram(args[0], config.env());
+            if (config.apparmorProfile() != null) {
+                LinuxCalls.setApparmor(config.apparmorProfile());
+            }
+            if (config.capabilities() != null) {
+                LinuxCalls.dropBounding(config.capabilities());
+            }
+            LinuxCalls.applyIdentity(config.user(), config.rlimits(), config.oomScoreAdj(), config.capabilities() != null);
+            if (config.capabilities() != null) {
+                LinuxCalls.commitCapabilities(config.capabilities());
+            }
+            if (config.noNewPrivileges()) {
+                LinuxCalls.noNewPrivileges();
+            }
+            if (config.seccomp() != null) {
+                LinuxCalls.installSeccomp(config.seccomp());
+            }
+            runHooks(config, "startContainer", hookState(config, hookId, "running", hookPid, hookBundle));
+            try {
+                LinuxCalls.exec(args, config.env().toArray(String[]::new));
+            } catch (RuntimeException failure) {
+                if (execFd >= 0) {
+                    RuntimeFifo.signalExecFailed(execFd);
+                }
+                throw failure;
+            }
+            return 1;
+        } catch (Exception failure) {
+            if (!announced) {
+                announceFailure(state);
             }
             throw failure;
         }
-        return 1;
     }
 
 
@@ -347,8 +365,8 @@ public final class ContainerRuntime {
     public static int start(Path root, String id) throws IOException {
         requireLinux();
         Path state = requireContainer(root, id);
-        LinuxCalls.signalStart(state.resolve("start.fifo").toString());
-        LinuxCalls.waitUntilExec(state.resolve("exec.fifo").toString());
+        RuntimeFifo.signal(state.resolve("start.fifo").toString());
+        RuntimeFifo.waitUntilExec(state.resolve("exec.fifo").toString());
         Files.writeString(state.resolve("status"), "running");
         String bundle = text(state.resolve("bundle"));
         if (Files.exists(state.resolve("config.json"))) {
@@ -557,18 +575,17 @@ public final class ContainerRuntime {
         return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
     }
 
-    private static void waitUntil(Path state, String wanted, String failed) throws IOException, InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String status = Files.readString(state.resolve("status")).trim();
-            if (wanted.equals(status)) {
-                return;
-            }
-            if (failed.equals(status)) {
-                throw new IllegalStateException("container init failed");
-            }
-            Thread.sleep(50);
+    private static void announceFailure(Path state) {
+        try {
+            Files.writeString(state.resolve("status"), "failed");
+        } catch (IOException ignored) {
+            // The fifo is what unblocks create.
         }
-        throw new IllegalStateException("timed out waiting for container creation");
+        try {
+            RuntimeFifo.signal(state.resolve("created.fifo").toString());
+        } catch (RuntimeException ignored) {
+            // create reports the timeout when this signal cannot be delivered.
+        }
     }
 
     private static Path containerDir(Path root, String id) {

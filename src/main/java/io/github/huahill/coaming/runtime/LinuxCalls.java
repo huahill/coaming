@@ -31,12 +31,6 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle SETHOSTNAME = downcall("sethostname", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-    private static final MethodHandle MKFIFO = downcall("mkfifo", FunctionDescriptor.of(
-            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
-    private static final MethodHandle OPENAT = downcall("openat", FunctionDescriptor.of(
-            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
-    private static final MethodHandle READ = downcall("read", FunctionDescriptor.of(
-            ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
     private static final MethodHandle WRITE = downcall("write", FunctionDescriptor.of(
             ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
     private static final MethodHandle CLOSE = downcall("close", FunctionDescriptor.of(
@@ -88,10 +82,6 @@ final class LinuxCalls {
     private static final int MS_PRIVATE = 1 << 18;
     private static final int MS_BIND = 4096;
     private static final int MNT_DETACH = 2;
-    private static final int O_RDONLY = 0;
-    private static final int O_WRONLY = 1;
-    private static final int O_RDWR = 2;
-    private static final int O_CLOEXEC = 524288;
 
     private LinuxCalls() {}
 
@@ -232,100 +222,6 @@ final class LinuxCalls {
             }
         } catch (Throwable failure) {
             throw new IllegalStateException("sethostname failed", failure);
-        }
-    }
-
-    static void mkfifo(String path) {
-        try (Arena arena = Arena.ofConfined()) {
-            int rc = (int) MKFIFO.invokeExact(arena.allocateFrom(path), 0644);
-            if (rc != 0) {
-                throw new IllegalStateException("mkfifo " + path + " failed: " + errno());
-            }
-        } catch (Throwable failure) {
-            throw new IllegalStateException("mkfifo " + path + " failed", failure);
-        }
-    }
-
-    static int openStartFifo(String fifo) {
-        return open(fifo, O_RDWR);
-    }
-
-    static void readStartByte(int fd) {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment buf = arena.allocate(1);
-            while (true) {
-                long rc = (long) READ.invokeExact(fd, buf, 1L);
-                if (rc > 0) {
-                    return;
-                }
-                if (rc < 0 && errno() != 4) {
-                    throw new IllegalStateException("reading start fifo failed: " + errno());
-                }
-            }
-        } catch (Throwable failure) {
-            throw new IllegalStateException("waiting for start failed", failure);
-        } finally {
-            close(fd);
-        }
-    }
-
-    static void signalStart(String fifo) {
-        int fd = open(fifo, O_WRONLY);
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment buf = arena.allocate(1);
-            buf.set(ValueLayout.JAVA_BYTE, 0, (byte) 1);
-            long rc = (long) WRITE.invokeExact(fd, buf, 1L);
-            if (rc != 1) {
-                throw new IllegalStateException("writing start fifo failed: " + errno());
-            }
-        } catch (Throwable failure) {
-            throw new IllegalStateException("writing start fifo failed", failure);
-        } finally {
-            close(fd);
-        }
-    }
-
-    static int openExecFifo(String fifo) {
-        return open(fifo, O_WRONLY | O_CLOEXEC);
-    }
-
-    static void signalExecFailed(int fd) {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment buf = arena.allocate(1);
-            buf.set(ValueLayout.JAVA_BYTE, 0, (byte) 'E');
-            WRITE.invokeExact(fd, buf, 1L);
-        } catch (Throwable ignored) {
-            // The original exec error is the one that matters.
-        } finally {
-            close(fd);
-        }
-    }
-
-    static void waitUntilExec(String fifo) {
-        int fd = open(fifo, O_RDONLY);
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment buf = arena.allocate(1);
-            while (true) {
-                long rc = (long) READ.invokeExact(fd, buf, 1L);
-                if (rc == 0) {
-                    return;
-                }
-                if (rc > 0) {
-                    if (buf.get(ValueLayout.JAVA_BYTE, 0) == (byte) 'E') {
-                        throw new IllegalStateException("container exec failed");
-                    }
-                    continue;
-                }
-                if (errno() != 4) {
-                    throw new IllegalStateException("reading exec fifo failed: " + errno());
-                }
-            }
-        } catch (RuntimeException failure) {
-            throw failure;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("waiting for exec failed", failure);
-        } finally {
-            close(fd);
         }
     }
 
@@ -676,18 +572,6 @@ final class LinuxCalls {
 
     private static MemorySegment cstring(Arena arena, String value) {
         return value == null ? MemorySegment.NULL : arena.allocateFrom(value);
-    }
-
-    private static int open(String path, int flags) {
-        try (Arena arena = Arena.ofConfined()) {
-            int fd = (int) OPENAT.invokeExact(-100, arena.allocateFrom(path), flags, 0);
-            if (fd < 0) {
-                throw new IllegalStateException("open " + path + " failed: " + errno());
-            }
-            return fd;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("open " + path + " failed", failure);
-        }
     }
 
     static void closeFd(int fd) {

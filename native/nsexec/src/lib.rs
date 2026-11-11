@@ -162,6 +162,8 @@ fn enter_container() {
         if mount_join >= 0 {
             libc::close(mount_join);
         }
+        // A fresh exec maps the image clean. Returning here forks the
+        // native-image pages into copy-on-write and measured slower.
         let mut argv: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
         argv.push(std::ptr::null());
         libc::execve(args[0].as_ptr(), argv.as_ptr(), environ());
