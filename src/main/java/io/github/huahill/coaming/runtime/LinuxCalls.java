@@ -62,6 +62,8 @@ final class LinuxCalls {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle MKNOD = downcall("mknod", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
+    private static final MethodHandle CHMOD = downcall("chmod", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle SECCOMP_INIT = seccomp("seccomp_init", FunctionDescriptor.of(
             ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     private static final MethodHandle SECCOMP_RESOLVE = seccomp("seccomp_syscall_resolve_name", FunctionDescriptor.of(
@@ -478,8 +480,11 @@ final class LinuxCalls {
         }
         long dev = ((major & 0xfff) << 8) | ((major & 0xfffff000L) << 32) | (minor & 0xff) | ((minor & 0xffffff00L) << 12);
         try (Arena arena = Arena.ofConfined()) {
-            int rc = (int) MKNOD.invokeExact(arena.allocateFrom(path), kind | (fileMode & 07777), dev);
+            int mode = fileMode & 07777;
+            int rc = (int) MKNOD.invokeExact(arena.allocateFrom(path), kind | mode, dev);
             if (rc == 0 || errno() == 17) {
+                // mknod applies the process umask, so 0666 would otherwise become 0644.
+                check((int) CHMOD.invokeExact(arena.allocateFrom(path), mode), "chmod " + path);
                 return;
             }
             int error = errno();
