@@ -1256,7 +1256,7 @@ fn open_pty() -> (i32, i32) {
         if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
             libc::_exit(97);
         }
-        let mut name = [0i8; 128];
+        let mut name = [0 as libc::c_char; 128];
         if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
             libc::_exit(97);
         }
