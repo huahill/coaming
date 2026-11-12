@@ -112,6 +112,8 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -126,17 +128,17 @@ jobs:
           arm64=dist/coaming-${version}-linux-arm64.tar.gz
           test -f "$amd64"
           test -f "$arm64"
-          cat > release-notes.md <<EOF
+          cat > release-notes.md <<'EOF'
           Linux amd64 and arm64, built by GitHub Actions from this tag.
 
-          Each archive contains \`coaming\` and \`coaming-runtime\` for one architecture. Keep the two files from the same archive together. Point containerd \`BinaryName\` or cri-o \`runtime_path\` at \`coaming\`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
+          Each archive contains `coaming` and `coaming-runtime` for one architecture. Keep the two files from the same archive together. Point containerd `BinaryName` or cri-o `runtime_path` at `coaming`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
 
           The recorded critest run is amd64. The arm64 archive has not been through that suite.
 
-          cgroup v2 only. A non-empty \`process.selinuxLabel\` is rejected.
+          cgroup v2 only. A non-empty `process.selinuxLabel` is rejected.
           EOF
-          sed -i 's/^          //' release-notes.md
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "coaming ${version}" \
             --notes-file release-notes.md \
             "$amd64" \
