@@ -51,10 +51,10 @@ Ubuntu 26.10, kernel 7.3.0-10-generic, 12 cores, 32 GiB, cgroup v2.
 
 | Runtime | Time (mean ± σ) | Range (min … max) | vs coaming | Version |
 | --- | --- | --- | --- | --- |
-| crun | 6.3 ms ± 0.2 ms | 5.8 ms … 7.3 ms | 18% | 1.30.1 |
-| coaming | 35.2 ms ± 3.3 ms | 28.7 ms … 44.2 ms | 100% | 0.1.0 |
-| youki | 38.8 ms ± 4.5 ms | 26.0 ms … 47.0 ms | 110% | 0.7.0 |
-| runc | 131.3 ms ± 3.2 ms | 125.4 ms … 139.2 ms | 373% | 1.1.14 |
+| crun | 7.5 ms ± 2.5 ms | 5.8 ms … 22.5 ms | 12% | 1.30.1 |
+| youki | 36.1 ms ± 6.2 ms | 25.8 ms … 50.3 ms | 56% | 0.7.0 |
+| coaming | 64.4 ms ± 6.7 ms | 55.2 ms … 91.2 ms | 100% | 0.1.0 |
+| runc | 131.7 ms ± 3.9 ms | 125.5 ms … 142.5 ms | 204% | 1.1.14 |
 
 Details about the benchmark
 
@@ -67,8 +67,8 @@ echo 3 > /proc/sys/vm/drop_caches
 
 ```sh
 hyperfine --shell=default --warmup 10 --min-runs 100 \
-  --prepare '/usr/local/bin/coaming --root /run/coaming-bench delete --force a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
-  '/usr/local/bin/coaming --root /run/coaming-bench create --bundle /var/tmp/coaming-bench/tutorial a && /usr/local/bin/coaming --root /run/coaming-bench start a && /usr/local/bin/coaming --root /run/coaming-bench delete --force a'
+  --prepare '/tmp/coaming/target/coaming --root /run/coaming-bench delete --force a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/tmp/coaming/target/coaming --root /run/coaming-bench create --bundle /var/tmp/coaming-bench/tutorial a && /tmp/coaming/target/coaming --root /run/coaming-bench start a && /tmp/coaming/target/coaming --root /run/coaming-bench delete --force a'
 
 hyperfine --shell=default --warmup 10 --min-runs 100 \
   --prepare 'runc --root /run/runc-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
