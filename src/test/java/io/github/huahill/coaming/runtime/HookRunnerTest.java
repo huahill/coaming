@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.huahill.coaming.oci.OciHook;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,5 +38,19 @@ class HookRunnerTest {
         IllegalStateException failure = assertThrows(IllegalStateException.class, () -> runner.run(
                 List.of(new OciHook("/hooks/missing", List.of(), List.of(), null)), Map.of()));
         assertTrue(failure.getMessage().contains("/hooks/missing"));
+        assertTrue(failure.getMessage().contains("cannot start"));
+    }
+
+    @Test
+    void hookArgZeroBecomesArgvZero() throws Exception {
+        Path dir = Files.createTempDirectory("coaming-hook");
+        Path out = dir.resolve("argv0");
+        int code = HookRunner.spawn(new OciHook("/usr/bin/perl", List.of(
+                "libnetwork-setkey",
+                "-e",
+                "open my $file, q{>}, shift; print {$file} `ps -p $$ -o args=`",
+                out.toString()), List.of(), null), Map.of("id", "demo"));
+        assertEquals(0, code);
+        assertTrue(Files.readString(out).startsWith("libnetwork-setkey "));
     }
 }
