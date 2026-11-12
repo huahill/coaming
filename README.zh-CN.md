@@ -59,7 +59,9 @@ RSS 是 `/bin/sleep` 的 `VmRSS`，不是 `coaming` 或 `runc` 的内存。它�
 
 `v` 标签对应的 GitHub Release 安装包由 GitHub Actions 构建，不是在开发者机器上构建的。
 
-`dev/package.sh` 把启动器和原生镜像打成 `coaming-<version>-linux-amd64.tar.gz`。版本号来自 `Coaming.VERSION`。`coaming` 是小启动器，`coaming-runtime` 是原生镜像，两个文件放在同一目录。把两个文件解压到同一目录，例如 `/usr/local/bin`。下面的路径使用这个位置。
+`dev/package.sh` 按当前机器命名压缩包：`coaming-<version>-linux-amd64.tar.gz` 或 `coaming-<version>-linux-arm64.tar.gz`。版本号来自 `Coaming.VERSION`。`coaming` 是小启动器，`coaming-runtime` 是原生镜像，两个文件放在同一目录。把两个文件解压到同一目录，例如 `/usr/local/bin`。下面的路径使用这个位置。
+
+`v` 标签的 GitHub Release 包含这两个压缩包，由 Actions 构建。上面的一致性测试是在 amd64 上测的。arm64 压缩包在 `ubuntu-24.04-arm` 上构建，没有跑过那套测试。
 
 下面各节把一个服务指到这个 `coaming`。不要替换 `/usr/bin/runc`。containerd 的 shim 仍是 `containerd-shim-runc-v2`。`SystemdCgroup` 必须和节点上现有 `runc` 运行时一致。
 

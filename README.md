@@ -59,7 +59,9 @@ These rows are a record of that run. They are not a result, and they are not evi
 
 The GitHub Release asset for a `v` tag is built by GitHub Actions, not on a developer machine.
 
-`dev/package.sh` packs the launcher and the native image into `coaming-<version>-linux-amd64.tar.gz`. The version is `Coaming.VERSION`. `coaming` is the small launcher. `coaming-runtime` is the native image, and the two files stay in the same directory. Unpack both into one directory, such as `/usr/local/bin`. The paths below use that location.
+`dev/package.sh` names the archive from the machine: `coaming-<version>-linux-amd64.tar.gz` or `coaming-<version>-linux-arm64.tar.gz`. The version is `Coaming.VERSION`. `coaming` is the small launcher. `coaming-runtime` is the native image, and the two files stay in the same directory. Unpack both into one directory, such as `/usr/local/bin`. The paths below use that location.
+
+The GitHub Release for a `v` tag contains both archives, built by Actions. The conformance results above were measured on amd64. The arm64 archive is built on `ubuntu-24.04-arm` and has not been through that suite.
 
 The sections below point one service at that `coaming`. Leave `/usr/bin/runc` in place. containerd keeps the shim `containerd-shim-runc-v2`. `SystemdCgroup` must match the `runc` runtime already used on the node.
 

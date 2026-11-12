@@ -20,7 +20,16 @@ stage=$(mktemp -d)
 cp "$launcher" "$stage/coaming"
 cp "$binary" "$stage/coaming-runtime"
 chmod 755 "$stage/coaming" "$stage/coaming-runtime"
-archive=$root/coaming-$version-linux-amd64.tar.gz
+machine=$(uname -m)
+case "$machine" in
+  x86_64) arch=amd64 ;;
+  aarch64) arch=arm64 ;;
+  *)
+    echo "unsupported architecture: $machine" >&2
+    exit 1
+    ;;
+esac
+archive=$root/coaming-$version-linux-$arch.tar.gz
 tar -C "$stage" -czf "$archive" coaming coaming-runtime
 rm -r "$stage"
 echo "$archive"

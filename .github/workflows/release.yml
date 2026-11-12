@@ -9,9 +9,18 @@ permissions:
   contents: write
 
 jobs:
-  linux-amd64:
-    runs-on: ubuntu-latest
+  package:
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v7
 
@@ -28,7 +37,12 @@ jobs:
         run: |
           # setup-java only accepts graalvm-community-jdk-<digits>. java-version 25
           # therefore installs 25.0.2 and skips the 25i3 build used for conformance.
-          url=https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.3.4.1/graalvm-community-jdk-25i3-25.0.4.1_linux-x64_bin.tar.gz
+          case "$(uname -m)" in
+            x86_64) suffix=linux-x64 ;;
+            aarch64) suffix=linux-aarch64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          url=https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.3.4.1/graalvm-community-jdk-25i3-25.0.4.1_${suffix}_bin.tar.gz
           curl -fsSL -o /tmp/graal.tar.gz -L "$url"
           curl -fsSL -o /tmp/graal.sha256 -L "$url.sha256"
           echo "$(cat /tmp/graal.sha256)  /tmp/graal.tar.gz" | sha256sum -c -
@@ -45,6 +59,11 @@ jobs:
         run: |
           command -v cc >/dev/null
           command -v make >/dev/null
+          case "$(uname -m)" in
+            x86_64) libdir=/usr/lib/x86_64-linux-gnu ;;
+            aarch64) libdir=/usr/lib/aarch64-linux-gnu ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
           # The runner cannot resolve the Ubuntu archive, so gperf is not installed.
           # The 2.5.5 release already contains the generated syscall tables.
           mkdir -p "$HOME/.local/bin"
@@ -56,7 +75,7 @@ jobs:
           tar -C /tmp -xzf /tmp/libseccomp.tar.gz
           cd /tmp/libseccomp-2.5.5
           touch src/syscalls.perf src/syscalls.perf.c
-          ./configure --prefix=/usr --libdir=/usr/lib/x86_64-linux-gnu
+          ./configure --prefix=/usr --libdir="$libdir"
           touch src/syscalls.perf src/syscalls.perf.c
           make -j"$(nproc)"
           sudo make install
@@ -72,24 +91,53 @@ jobs:
       - name: Build the native image
         run: mvn -B -Pnative -DskipTests package
 
-      - name: Pack and publish the GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pack the archive
         run: |
           version=$(sed -n 's/.*static final String VERSION = "\([^"]*\)".*/\1/p' src/main/java/io/github/huahill/coaming/Coaming.java)
           archive=$(sh dev/package.sh)
           case "$archive" in
-            *"/coaming-${version}-linux-amd64.tar.gz") ;;
+            *"/coaming-${version}-linux-${{ matrix.arch }}.tar.gz") ;;
             *) echo "unexpected archive: $archive" >&2; exit 1 ;;
           esac
-          cat > release-notes.md <<'EOF'
-          Linux amd64, built by GitHub Actions from this tag.
+          mkdir -p dist
+          cp "$archive" dist/
 
-          The archive contains `coaming` and `coaming-runtime`. Keep them in the same directory. Point containerd `BinaryName` or cri-o `runtime_path` at `coaming`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coaming-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
-          cgroup v2 only. A non-empty `process.selinuxLabel` is rejected.
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          amd64=dist/coaming-${version}-linux-amd64.tar.gz
+          arm64=dist/coaming-${version}-linux-arm64.tar.gz
+          test -f "$amd64"
+          test -f "$arm64"
+          cat > release-notes.md <<EOF
+          Linux amd64 and arm64, built by GitHub Actions from this tag.
+
+          Each archive contains \`coaming\` and \`coaming-runtime\` for one architecture. Keep the two files from the same archive together. Point containerd \`BinaryName\` or cri-o \`runtime_path\` at \`coaming\`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
+
+          The recorded critest run is amd64. The arm64 archive has not been through that suite.
+
+          cgroup v2 only. A non-empty \`process.selinuxLabel\` is rejected.
           EOF
+          sed -i 's/^          //' release-notes.md
           gh release create "$GITHUB_REF_NAME" \
             --title "coaming ${version}" \
             --notes-file release-notes.md \
-            "$archive"
+            "$amd64" \
+            "$arm64"
