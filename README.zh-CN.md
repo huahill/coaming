@@ -43,16 +43,59 @@ containerd 把 `BinaryName` 指到这个二进制，shim 仍是 `containerd-shim
 
 ## 对比
 
-一台 cgroup v2 机器、一份 bundle、三次采样。机器、内核和发行版没有记录。计时从 `create` 开始，到 `start` 返回结束，此时 `/bin/sleep` 已经进入。这条路径不经过 containerd 或 cri-o，也不测量镜像拉取、容器密度或安静的实验室环境。没有中位数，也没有分位数。同一套做法更早的几次运行得到过不同的数字。
+一份 busybox bundle，进程是 `sleep 30`。计时命令是 `create`、`start` 和 `delete -f`。`delete` 会停止该进程。hyperfine 预热 10 次，正式测量 100 次。每次正式测量前执行 `sync` 并清空页缓存，这一步不计入时间。直接调用运行时二进制。
 
-RSS 是 `/bin/sleep` 的 `VmRSS`，不是 `coaming` 或 `runc` 的内存。它不能说明哪个运行时更省内存。
+配置是 OCI 1.2.0，ambient capabilities 为空，没有设备 cgroup 规则。
 
-下面几行只是那次运行的记录，不是结论，也不能当作任一运行时更快或更小的证据。
+Ubuntu 26.10，内核 7.3.0-10-generic，12 核，32 GiB，cgroup v2。
 
-| 运行时 | 第 1 次 | 第 2 次 | 第 3 次 |
-| --- | --- | --- | --- |
-| coaming 0.1.0 | 23 ms，2348 KiB | 32 ms，2344 KiB | 18 ms，2468 KiB |
-| runc 1.4.2 | 23 ms，2332 KiB | 21 ms，2296 KiB | 18 ms，2324 KiB |
+| 运行时 | 时间（平均 ± σ） | 范围（最小 … 最大） | 相对 coaming | 版本 |
+| --- | --- | --- | --- | --- |
+| crun | 6.3 ms ± 0.2 ms | 5.8 ms … 7.3 ms | 18% | 1.30.1 |
+| coaming | 35.2 ms ± 3.3 ms | 28.7 ms … 44.2 ms | 100% | 0.1.0 |
+| youki | 38.8 ms ± 4.5 ms | 26.0 ms … 47.0 ms | 110% | 0.7.0 |
+| runc | 131.3 ms ± 3.2 ms | 125.4 ms … 139.2 ms | 373% | 1.1.14 |
+
+测试细节
+
+`hyperfine` 2.0.0，参数是 `--shell=default --warmup 10 --min-runs 100`。bundle 是 `/var/tmp/coaming-bench/tutorial`。每次正式测量前先删掉名为 `a` 的残留容器，然后：
+
+```sh
+sync
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+```sh
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/usr/local/bin/coaming --root /run/coaming-bench delete --force a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/usr/local/bin/coaming --root /run/coaming-bench create --bundle /var/tmp/coaming-bench/tutorial a && /usr/local/bin/coaming --root /run/coaming-bench start a && /usr/local/bin/coaming --root /run/coaming-bench delete --force a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare 'runc --root /run/runc-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  'runc --root /run/runc-bench create -b /var/tmp/coaming-bench/tutorial a && runc --root /run/runc-bench start a && runc --root /run/runc-bench delete -f a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/var/tmp/coaming-bench/bin/crun --root /run/crun-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/var/tmp/coaming-bench/bin/crun --root /run/crun-bench create -b /var/tmp/coaming-bench/tutorial a && /var/tmp/coaming-bench/bin/crun --root /run/crun-bench start a && /var/tmp/coaming-bench/bin/crun --root /run/crun-bench delete -f a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/var/tmp/coaming-bench/bin/youki -r /run/youki-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/var/tmp/coaming-bench/bin/youki -r /run/youki-bench create -b /var/tmp/coaming-bench/tutorial a && /var/tmp/coaming-bench/bin/youki -r /run/youki-bench start a && /var/tmp/coaming-bench/bin/youki -r /run/youki-bench delete -f a'
+```
+
+```text
+coaming version 0.1.0
+runc version 1.1.14
+crun version 1.30.1
+youki version: 0.7.0
+Kernel-Release    7.3.0-10-generic
+Kernel-Version    #10-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 22 07:35:54 UTC 2026
+Architecture      x86_64
+Operating System  Ubuntu 26.10
+Cores             12
+Total Memory      31357
+Cgroup setup      unified
+```
 
 
 ## 安装

@@ -43,16 +43,59 @@ Conformance is recorded in [dev/conformance/README.md](dev/conformance/README.md
 
 ## Comparison
 
-One cgroup v2 machine, one bundle, three samples. The machine, kernel, and distribution were not recorded. The clock starts at `create` and stops when `start` returns, after `/bin/sleep` has been entered. This does not go through containerd or cri-o, and it does not measure image pull, density, or a quiet lab run. There is no median or percentile. Earlier runs on the same setup produced different numbers.
+One busybox bundle, process `sleep 30`. The timed command is `create`, `start`, and `delete -f`. Delete stops the process. hyperfine warms up 10 times and measures 100 times. Before each measured run, `sync` drops the page cache. That step is not included in the time. The runtime binaries are invoked directly.
 
-RSS is `VmRSS` of `/bin/sleep`, not of `coaming` or `runc`. It does not show which runtime uses less memory.
+The spec is OCI 1.2.0, with empty ambient capabilities and no device cgroup rule.
 
-These rows are a record of that run. They are not a result, and they are not evidence that either runtime is faster or smaller.
+Ubuntu 26.10, kernel 7.3.0-10-generic, 12 cores, 32 GiB, cgroup v2.
 
-| runtime | sample 1 | sample 2 | sample 3 |
-| --- | --- | --- | --- |
-| coaming 0.1.0 | 23 ms, 2348 KiB | 32 ms, 2344 KiB | 18 ms, 2468 KiB |
-| runc 1.4.2 | 23 ms, 2332 KiB | 21 ms, 2296 KiB | 18 ms, 2324 KiB |
+| Runtime | Time (mean ± σ) | Range (min … max) | vs coaming | Version |
+| --- | --- | --- | --- | --- |
+| crun | 6.3 ms ± 0.2 ms | 5.8 ms … 7.3 ms | 18% | 1.30.1 |
+| coaming | 35.2 ms ± 3.3 ms | 28.7 ms … 44.2 ms | 100% | 0.1.0 |
+| youki | 38.8 ms ± 4.5 ms | 26.0 ms … 47.0 ms | 110% | 0.7.0 |
+| runc | 131.3 ms ± 3.2 ms | 125.4 ms … 139.2 ms | 373% | 1.1.14 |
+
+Details about the benchmark
+
+`hyperfine` 2.0.0, with `--shell=default --warmup 10 --min-runs 100`. The bundle is `/var/tmp/coaming-bench/tutorial`. Before each measured run, a leftover container named `a` is deleted, then:
+
+```sh
+sync
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+```sh
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/usr/local/bin/coaming --root /run/coaming-bench delete --force a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/usr/local/bin/coaming --root /run/coaming-bench create --bundle /var/tmp/coaming-bench/tutorial a && /usr/local/bin/coaming --root /run/coaming-bench start a && /usr/local/bin/coaming --root /run/coaming-bench delete --force a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare 'runc --root /run/runc-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  'runc --root /run/runc-bench create -b /var/tmp/coaming-bench/tutorial a && runc --root /run/runc-bench start a && runc --root /run/runc-bench delete -f a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/var/tmp/coaming-bench/bin/crun --root /run/crun-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/var/tmp/coaming-bench/bin/crun --root /run/crun-bench create -b /var/tmp/coaming-bench/tutorial a && /var/tmp/coaming-bench/bin/crun --root /run/crun-bench start a && /var/tmp/coaming-bench/bin/crun --root /run/crun-bench delete -f a'
+
+hyperfine --shell=default --warmup 10 --min-runs 100 \
+  --prepare '/var/tmp/coaming-bench/bin/youki -r /run/youki-bench delete -f a >/dev/null 2>&1 || true; sync; echo 3 > /proc/sys/vm/drop_caches' \
+  '/var/tmp/coaming-bench/bin/youki -r /run/youki-bench create -b /var/tmp/coaming-bench/tutorial a && /var/tmp/coaming-bench/bin/youki -r /run/youki-bench start a && /var/tmp/coaming-bench/bin/youki -r /run/youki-bench delete -f a'
+```
+
+```text
+coaming version 0.1.0
+runc version 1.1.14
+crun version 1.30.1
+youki version: 0.7.0
+Kernel-Release    7.3.0-10-generic
+Kernel-Version    #10-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 22 07:35:54 UTC 2026
+Architecture      x86_64
+Operating System  Ubuntu 26.10
+Cores             12
+Total Memory      31357
+Cgroup setup      unified
+```
 
 
 ## Install
