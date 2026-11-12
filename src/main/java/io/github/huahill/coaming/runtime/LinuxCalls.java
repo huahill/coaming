@@ -77,6 +77,11 @@ final class LinuxCalls {
     private static final MethodHandle SECCOMP_RELEASE = seccomp("seccomp_release", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
     private static final MethodHandle CHOWN = downcall("chown", FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle SETSID = downcall("setsid", FunctionDescriptor.of(ValueLayout.JAVA_INT));
+    private static final MethodHandle DUP2 = downcall("dup2", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+    private static final MethodHandle IOCTL = downcall("ioctl", FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT));
 
     private static final int RDONLY = 1;
     private static final int MS_REMOUNT = 32;
@@ -263,15 +268,58 @@ final class LinuxCalls {
     }
 
     static void kill(int pid, int signal) {
+        if (signalOnce(pid, signal)) {
+            return;
+        }
+        // containerd allows signals from peer unconfined, runc, or crun. A named
+        // profile stays a distinct peer even with flags=(unconfined), so the kernel
+        // returns EACCES until this process becomes unconfined.
+        if (errno() == 13 && becomeUnconfined() && signalOnce(pid, signal)) {
+            return;
+        }
+        if (errno() == 3) {
+            return;
+        }
+        throw new IllegalStateException("kill " + pid + " failed: " + errno());
+    }
+
+    private static boolean signalOnce(int pid, int signal) {
         try {
-            int rc = (int) KILL.invokeExact(pid, signal);
-            if (rc != 0 && errno() != 3) {
-                throw new IllegalStateException("kill " + pid + " failed: " + errno());
-            }
-        } catch (IllegalStateException failure) {
-            throw failure;
+            return (int) KILL.invokeExact(pid, signal) == 0;
         } catch (Throwable failure) {
             throw new IllegalStateException("kill " + pid + " failed", failure);
+        }
+    }
+
+    private static boolean becomeUnconfined() {
+        for (String path : new String[] {"/proc/self/attr/apparmor/current", "/proc/self/attr/current"}) {
+            try (var output = Files.newOutputStream(Path.of(path))) {
+                output.write("changeprofile unconfined".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                return true;
+            } catch (java.io.IOException ignored) {
+                // The other attr path may exist.
+            }
+        }
+        return false;
+    }
+
+    static void claimTerminal(int slave) {
+        try {
+            check((int) SETSID.invokeExact(), "setsid");
+            for (int fd = 0; fd < 3; fd++) {
+                check((int) DUP2.invokeExact(slave, fd), "dup2");
+            }
+            int claimed = (int) IOCTL.invokeExact(0, 0x540EL, 0);
+            if (claimed != 0) {
+                check((int) IOCTL.invokeExact(0, 0x540EL, 1), "claim terminal");
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("claim terminal failed", failure);
+        }
+        if (slave > 2) {
+            close(slave);
         }
     }
 
@@ -683,6 +731,11 @@ final class LinuxCalls {
                 return SymbolLookup.libraryLookup(Path.of(candidate), Arena.global());
             }
         }
-        throw new IllegalStateException("libseccomp is not installed");
+        try {
+            // The file is not visible after setns. The constructor already loaded the soname.
+            return SymbolLookup.libraryLookup("libseccomp.so.2", Arena.global());
+        } catch (IllegalArgumentException failure) {
+            throw new IllegalStateException("libseccomp is not installed", failure);
+        }
     }
 }

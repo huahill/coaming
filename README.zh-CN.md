@@ -15,7 +15,7 @@ mvn test
 mvn -Pnative -DskipTests package
 ```
 
-`target/coaming` 是原生镜像。启动器是 `native/nsexec/target/release/coaming`。`dev/package.sh` 把这两个文件打进同一个压缩包。GitHub Release 里的安装包由 Actions 根据 `v` 标签构建。
+`target/coaming` 是原生镜像。Rust 链进这个文件，只在进程还是单线程时运行。`dev/package.sh` 把这一个文件打进压缩包。GitHub Release 里的安装包由 Actions 根据 `v` 标签构建。
 
 ## 运行
 
@@ -102,7 +102,7 @@ Cgroup setup      unified
 
 `v` 标签对应的 GitHub Release 安装包由 GitHub Actions 构建，不是在开发者机器上构建的。
 
-`dev/package.sh` 按当前机器命名压缩包：`coaming-<version>-linux-amd64.tar.gz` 或 `coaming-<version>-linux-arm64.tar.gz`。版本号来自 `Coaming.VERSION`。`coaming` 是小启动器，`coaming-runtime` 是原生镜像，两个文件放在同一目录。把两个文件解压到同一目录，例如 `/usr/local/bin`。下面的路径使用这个位置。
+`dev/package.sh` 按当前机器命名压缩包：`coaming-<version>-linux-amd64.tar.gz` 或 `coaming-<version>-linux-arm64.tar.gz`。版本号来自 `Coaming.VERSION`。压缩包里只有一个文件 `coaming`，就是原生镜像。把它解压为 `/usr/local/bin/coaming`。下面的路径使用这个位置。
 
 `v` 标签的 GitHub Release 包含这两个压缩包，由 Actions 构建。上面的一致性测试是在 amd64 上测的。arm64 压缩包在 `ubuntu-24.04-arm` 上构建，没有跑过那套测试。
 

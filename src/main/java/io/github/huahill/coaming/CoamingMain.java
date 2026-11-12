@@ -60,11 +60,16 @@ public final class CoamingMain {
             case "start" -> ContainerRuntime.start(line.root(), only(rest));
             case "state" -> ContainerRuntime.state(line.root(), only(rest));
             case "kill" -> {
-                CommandLine.takeFlag(rest, "--all");
+                boolean all = CommandLine.takeFlag(rest, "--all");
                 if (rest.size() != 2) {
                     throw new IllegalArgumentException("expected container id and signal");
                 }
-                yield ContainerRuntime.kill(line.root(), rest.get(0), rest.get(1));
+                yield ContainerRuntime.kill(line.root(), rest.get(0), rest.get(1), all);
+            }
+            case "exec-init" -> {
+                CommandLine.takeOption(rest, "--pid", "--pid-path", "--console");
+                CommandLine.takeFlag(rest, "--detach");
+                yield ContainerRuntime.execInside();
             }
             case "delete" -> {
                 boolean force = CommandLine.takeFlag(rest, "--force");
@@ -73,10 +78,11 @@ public final class CoamingMain {
             case "exec" -> {
                 String process = required(CommandLine.takeOption(rest, "--process"), "--process");
                 String pidFile = CommandLine.takeOption(rest, "--pid-file");
+                String console = CommandLine.takeOption(rest, "--console-socket");
                 boolean detach = CommandLine.takeFlag(rest, "--detach");
                 acceptUnused(rest);
                 yield ContainerRuntime.exec(
-                        line.root(), only(rest), Path.of(process), pidFile == null ? null : Path.of(pidFile), detach);
+                        line.root(), only(rest), Path.of(process), pidFile == null ? null : Path.of(pidFile), detach, console);
             }
             case "update" -> {
                 String resources = required(CommandLine.takeOption(rest, "--resources"), "--resources");

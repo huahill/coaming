@@ -10,7 +10,6 @@ import io.github.huahill.coaming.oci.OciMount;
 import io.github.huahill.coaming.oci.OciConfig;
 import io.github.huahill.coaming.oci.OciHook;
 import io.github.huahill.coaming.oci.OciProcess;
-import io.github.huahill.coaming.oci.Rlimit;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -77,6 +76,7 @@ public final class ContainerRuntime {
         command.add(bundle.toAbsolutePath().toString());
         command.addAll(NamespacePlan.arguments(config.namespaces(), config.namespacesSpecified(), config.uidMappings(), config.gidMappings()));
         command.addAll(IdmapPlan.arguments(config.mounts(), config.uidMappings(), config.gidMappings(), createsUserNamespace(config)));
+        command.addAll(io.github.huahill.coaming.oci.BindPlan.arguments(config.mounts()));
         Process helper = new ProcessBuilder(command).inheritIO().start();
         int helperExit = helper.waitFor();
         if (helperExit != 0) {
@@ -203,27 +203,9 @@ public final class ContainerRuntime {
                 LinuxCalls.chdir(config.cwd());
             }
             runHooks(config, "createContainer", hookState(config, hookId, "running", hookPid, hookBundle));
-            String[] args = config.args().toArray(String[]::new);
-            if (args.length == 0) {
-                throw new IllegalStateException("container has no process args");
-            }
-            args[0] = resolveProgram(args[0], config.env());
-            if (config.apparmorProfile() != null) {
-                LinuxCalls.setApparmor(config.apparmorProfile());
-            }
-            if (config.capabilities() != null) {
-                LinuxCalls.dropBounding(config.capabilities());
-            }
-            LinuxCalls.applyIdentity(config.user(), config.rlimits(), config.oomScoreAdj(), config.capabilities() != null);
-            if (config.capabilities() != null) {
-                LinuxCalls.commitCapabilities(config.capabilities());
-            }
-            if (config.noNewPrivileges()) {
-                LinuxCalls.noNewPrivileges();
-            }
-            if (config.seccomp() != null) {
-                LinuxCalls.installSeccomp(config.seccomp());
-            }
+            String[] args = prepareProcess(
+                    config.args(), config.cwd(), config.env(), config.apparmorProfile(), config.capabilities(),
+                    config.user(), config.rlimits(), config.oomScoreAdj(), config.noNewPrivileges(), config.seccomp());
             runHooks(config, "startContainer", hookState(config, hookId, "running", hookPid, hookBundle));
             note(errors, "exec");
             try {
@@ -406,15 +388,18 @@ public final class ContainerRuntime {
         LinuxCalls.mountPrepared(prepared.source(), dest.toString(), prepared.fstype(), prepared.flags(), prepared.remount(), prepared.propagation(), prepared.data());
     }
 
-    public static int exec(Path root, String id, Path process, Path pidFile, boolean detach) throws Exception {
+    public static int exec(Path root, String id, Path process, Path pidFile, boolean detach, String console) throws Exception {
         requireLinux();
-        int target = Integer.parseInt(Files.readString(requireContainer(root, id).resolve("pid")).trim());
-        OciProcess spec = OciProcess.parse(Files.readString(process));
+        Path state = requireContainer(root, id);
+        int target = Integer.parseInt(Files.readString(state.resolve("pid")).trim());
+        String specText = Files.readString(process);
+        OciProcess spec = OciProcess.parse(specText);
         if (spec.args().isEmpty()) {
             throw new IllegalArgumentException("exec process has no args");
         }
+        String configText = Files.readString(state.resolve("config.json"));
         List<String> command = new ArrayList<>();
-        command.add(Memfd.copyCurrentExecutable());
+        command.add(Path.of("/proc/self/exe").toRealPath().toString());
         command.add("exec-init");
         command.add("--pid");
         command.add(Integer.toString(target));
@@ -422,42 +407,127 @@ public final class ContainerRuntime {
             command.add("--pid-path");
             command.add(pidFile.toAbsolutePath().toString());
         }
-        command.add("--cwd");
-        command.add(spec.cwd());
-        for (String variable : spec.env()) {
-            command.add("--env");
-            command.add(variable);
+        if (console != null && !console.isBlank()) {
+            command.add("--console");
+            command.add(console);
         }
         if (detach) {
             command.add("--detach");
         }
-        if (spec.capabilities() != null) {
-            command.add("--caps");
-            command.add(spec.capabilities().encoded());
-        }
-        if (spec.noNewPrivileges()) {
-            command.add("--no-new-privs");
-        }
-        if (spec.user() != null) {
-            command.add("--user");
-            command.add(spec.user().encoded());
-        }
-        if (!spec.rlimits().isEmpty()) {
-            command.add("--rlimits");
-            command.add(Rlimit.encoded(spec.rlimits()));
-        }
-        if (spec.oomScoreAdj() != null) {
-            command.add("--oom");
-            command.add(Integer.toString(spec.oomScoreAdj()));
-        }
-        if (spec.apparmorProfile() != null) {
-            command.add("--apparmor");
-            command.add(spec.apparmorProfile());
+        for (String variable : spec.env()) {
+            command.add("--env");
+            command.add(variable);
         }
         command.add("--");
         command.addAll(spec.args());
-        Process helper = new ProcessBuilder(command).inheritIO().start();
-        return helper.waitFor();
+        ProcessBuilder builder = new ProcessBuilder(command);
+        var env = builder.environment();
+        env.put("COAMING_EXEC_CWD", spec.cwd());
+        if (spec.capabilities() != null) {
+            env.put("COAMING_EXEC_CAPS", spec.capabilities().encoded());
+        }
+        if (spec.user() != null) {
+            env.put("COAMING_EXEC_USER", spec.user().encoded());
+        }
+        if (!spec.rlimits().isEmpty()) {
+            env.put("COAMING_EXEC_RLIMITS", spec.rlimits().stream()
+                    .map(limit -> limit.resource() + "=" + limit.soft() + ":" + limit.hard())
+                    .reduce((left, right) -> left + "," + right).orElse(""));
+        }
+        if (spec.oomScoreAdj() != null) {
+            env.put("COAMING_EXEC_OOM", Integer.toString(spec.oomScoreAdj()));
+        }
+        if (spec.apparmorProfile() != null) {
+            env.put("COAMING_EXEC_APPARMOR", spec.apparmorProfile());
+        }
+        if (spec.noNewPrivileges()) {
+            env.put("COAMING_EXEC_NNP", "1");
+        }
+        String rules = seccompRules(seccompFromConfig(configText));
+        if (!rules.isEmpty()) {
+            env.put("COAMING_EXEC_SECCOMP", rules);
+        }
+        builder.inheritIO();
+        return builder.start().waitFor();
+    }
+    static String seccompRules(io.github.huahill.coaming.oci.SeccompProfile profile) {
+        if (profile == null) {
+            return "";
+        }
+        StringBuilder rules = new StringBuilder();
+        rules.append("DEFAULT ").append(profile.defaultAction()).append('\n');
+        for (var call : profile.syscalls()) {
+            for (String name : call.names()) {
+                rules.append("RULE ").append(call.action()).append(' ').append(name);
+                for (var arg : call.args()) {
+                    rules.append(' ').append(arg.index()).append(' ').append(arg.operation())
+                            .append(' ').append(arg.value()).append(' ').append(arg.valueTwo());
+                }
+                rules.append('\n');
+            }
+        }
+        return rules.toString();
+    }
+
+    public static int execInside() {
+        requireLinux();
+        String specText = System.getenv("COAMING_EXEC_SPEC");
+        if (specText == null || specText.isBlank()) {
+            throw new IllegalStateException("exec spec is missing");
+        }
+        OciProcess spec = OciProcess.parse(specText);
+        String[] args = prepareProcess(
+                spec.args(), spec.cwd(), spec.env(), spec.apparmorProfile(), spec.capabilities(),
+                spec.user(), spec.rlimits(), spec.oomScoreAdj(), spec.noNewPrivileges(),
+                seccompFromConfig(System.getenv("COAMING_EXEC_CONFIG")));
+        LinuxCalls.exec(args, spec.env().toArray(String[]::new));
+        return 1;
+    }
+
+    static io.github.huahill.coaming.oci.SeccompProfile seccompFromConfig(String configText) {
+        if (configText == null || configText.isBlank()) {
+            return null;
+        }
+        io.github.huahill.coaming.json.Json linux = io.github.huahill.coaming.json.Json.parse(configText).optional("linux");
+        if (linux == null || linux.optional("seccomp") == null) {
+            return null;
+        }
+        return io.github.huahill.coaming.oci.SeccompProfile.parse(linux.optional("seccomp"));
+    }
+
+    private static String[] prepareProcess(
+            List<String> arguments, String cwd, List<String> env, String apparmor, io.github.huahill.coaming.oci.LinuxCapabilities capabilities,
+            io.github.huahill.coaming.oci.ProcessUser user, List<io.github.huahill.coaming.oci.Rlimit> rlimits, Integer oom, boolean noNewPrivileges,
+            io.github.huahill.coaming.oci.SeccompProfile seccomp) {
+        String terminal = System.getenv("COAMING_TTY_FD");
+        if (terminal != null && !terminal.isBlank()) {
+            LinuxCalls.claimTerminal(Integer.parseInt(terminal));
+        }
+        if (cwd != null && !cwd.isBlank() && !"/".equals(cwd)) {
+            LinuxCalls.chdir(cwd);
+        }
+        if (arguments.isEmpty()) {
+            throw new IllegalStateException("container has no process args");
+        }
+        String[] args = arguments.toArray(String[]::new);
+        args[0] = resolveProgram(args[0], env);
+        if (apparmor != null) {
+            LinuxCalls.setApparmor(apparmor);
+        }
+        if (capabilities != null) {
+            LinuxCalls.dropBounding(capabilities);
+        }
+        LinuxCalls.applyIdentity(user, rlimits, oom, capabilities != null);
+        if (capabilities != null) {
+            LinuxCalls.commitCapabilities(capabilities);
+        }
+        if (noNewPrivileges) {
+            LinuxCalls.noNewPrivileges();
+        }
+        if (seccomp != null) {
+            LinuxCalls.installSeccomp(seccomp);
+        }
+        return args;
     }
 
     private static String containerError(Path error) {
@@ -555,11 +625,42 @@ public final class ContainerRuntime {
         return 0;
     }
 
-    public static int kill(Path root, String id, String signal) throws IOException {
+    public static int kill(Path root, String id, String signal, boolean all) throws IOException {
         requireLinux();
-        int pid = Integer.parseInt(Files.readString(requireContainer(root, id).resolve("pid")).trim());
-        LinuxCalls.kill(pid, Signals.number(signal));
+        Path state = requireContainer(root, id);
+        List<Integer> pids = new ArrayList<>();
+        if (all) {
+            pids.addAll(cgroupPids(state));
+        }
+        if (pids.isEmpty()) {
+            pids.add(Integer.parseInt(Files.readString(state.resolve("pid")).trim()));
+        }
+        int number = Signals.number(signal);
+        for (int pid : pids) {
+            LinuxCalls.kill(pid, number);
+        }
         return 0;
+    }
+
+    private static List<Integer> cgroupPids(Path state) throws IOException {
+        if (!Files.isRegularFile(state.resolve("cgroup"))) {
+            return List.of();
+        }
+        String cgroup = Files.readString(state.resolve("cgroup")).trim();
+        if (cgroup.isEmpty()) {
+            return List.of();
+        }
+        Path procs = Path.of(cgroup).resolve("cgroup.procs");
+        if (!Files.isRegularFile(procs)) {
+            return List.of();
+        }
+        List<Integer> pids = new ArrayList<>();
+        for (String item : Files.readString(procs).split("\\s+")) {
+            if (!item.isBlank()) {
+                pids.add(Integer.parseInt(item));
+            }
+        }
+        return pids;
     }
 
     public static int delete(Path root, String id, boolean force) throws IOException {
@@ -681,7 +782,7 @@ public final class ContainerRuntime {
             return;
         }
         try {
-            kill(root, id, "KILL");
+            kill(root, id, "KILL", false);
         } catch (RuntimeException | IOException ignored) {
             // The process may already have exited.
         }

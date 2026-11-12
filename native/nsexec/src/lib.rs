@@ -1,4 +1,4 @@
-mod bind_mounts;
+mod binds;
 
 /// Probe whether this process can enter a user namespace before any extra thread exists.
 ///
@@ -62,9 +62,13 @@ pub fn keep_early_init() {
 #[cfg(target_os = "linux")]
 fn first_argument() -> Option<String> {
     let data = std::fs::read("/proc/self/cmdline").unwrap_or_default();
-    let mut parts = data.split(|byte| *byte == 0).filter(|part| !part.is_empty());
+    let mut parts = data
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty());
     let _argv0 = parts.next();
-    parts.next().and_then(|part| String::from_utf8(part.to_vec()).ok())
+    parts
+        .next()
+        .and_then(|part| String::from_utf8(part.to_vec()).ok())
 }
 
 #[cfg(target_os = "linux")]
@@ -80,6 +84,7 @@ fn run_probe() {
 
 #[cfg(target_os = "linux")]
 fn enter_container() {
+    preload_seccomp();
     if std::env::var_os("COAMING_INIT_STAGE").is_some_and(|value| value == "jvm") {
         return;
     }
@@ -88,15 +93,6 @@ fn enter_container() {
         unsafe { libc::_exit(74) };
     };
     let pid_path = std::ffi::CString::new(format!("{state}/pid")).expect("pid path");
-    let args: Vec<std::ffi::CString> = std::fs::read("/proc/self/cmdline")
-        .unwrap_or_default()
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| std::ffi::CString::new(part.to_vec()).expect("argument"))
-        .collect();
-    if args.is_empty() {
-        unsafe { libc::_exit(75) };
-    }
     let parts = cmdline_parts();
     if let Ok(namespace) = std::fs::read_link("/proc/self/ns/uts") {
         set_env("COAMING_HOST_UTS", &namespace.to_string_lossy());
@@ -173,53 +169,15 @@ fn enter_container() {
         if mount_join >= 0 {
             libc::close(mount_join);
         }
-        let image = image_for_child(&args[0]);
-        let mut argv: Vec<*const libc::c_char> = Vec::with_capacity(args.len() + 1);
-        argv.push(image.as_ptr());
-        for arg in args.iter().skip(1) {
-            argv.push(arg.as_ptr());
-        }
-        argv.push(std::ptr::null());
-        libc::execve(image.as_ptr(), argv.as_ptr(), environ());
-        libc::_exit(72);
     }
 }
-
-#[cfg(target_os = "linux")]
-fn image_for_child(argv0: &std::ffi::CString) -> std::ffi::CString {
-    let Some(launcher) = std::env::var("COAMING_LAUNCHER").ok().filter(|value| !value.is_empty()) else {
-        return argv0.clone();
-    };
-    let Some(runtime) = std::env::var("COAMING_RUNTIME").ok().filter(|value| !value.is_empty()) else {
-        return argv0.clone();
-    };
-    let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
-        return argv0.clone();
-    };
-    let Ok(launcher_path) = std::fs::canonicalize(&launcher) else {
-        return argv0.clone();
-    };
-    if exe != launcher_path {
-        return argv0.clone();
-    }
-    std::ffi::CString::new(runtime).unwrap_or_else(|_| argv0.clone())
-}
-
 
 #[cfg(target_os = "linux")]
 fn prepare_bind_fds() {
-    let Some(bundle) = argument_value("--bundle") else {
-        unsafe { libc::_exit(74) };
+    let mounts = match binds::from_arguments(&cmdline_parts()) {
+        Ok(mounts) => mounts,
+        Err(()) => unsafe { libc::_exit(89) },
     };
-    let path = format!("{bundle}/config.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            complain(&format!("failed to read {path}: {error}"));
-            unsafe { libc::_exit(92) };
-        }
-    };
-    let mounts = bind_mounts::bind_mounts(&text);
     set_env("COAMING_BIND_COUNT", &mounts.len().to_string());
     for (index, mount) in mounts.iter().enumerate() {
         let opened = detach_bind(mount);
@@ -230,7 +188,7 @@ fn prepare_bind_fds() {
 }
 
 #[cfg(target_os = "linux")]
-fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
+fn detach_bind(mount: &binds::PreparedBind) -> i32 {
     let Ok(source) = std::ffi::CString::new(mount.source.clone()) else {
         complain("bind mount source contains NUL");
         unsafe { libc::_exit(92) };
@@ -240,7 +198,9 @@ fn detach_bind(mount: &bind_mounts::PreparedBind) -> i32 {
     if mount.recursive {
         flags |= libc::AT_RECURSIVE;
     }
-    let mounted = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) } as i32;
+    let mounted =
+        unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) }
+            as i32;
     if mounted < 0 {
         complain(&format!(
             "failed to open bind mount {}: {}",
@@ -349,9 +309,17 @@ fn park_fd(fd: i32, preferred: i32) -> i32 {
 }
 
 #[cfg(target_os = "linux")]
-fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, String)>, uid_map: &str, gid_map: &str) {
+fn prepare_user_namespace(
+    unshare: &mut Vec<String>,
+    joins: &mut Vec<(String, String)>,
+    uid_map: &str,
+    gid_map: &str,
+) {
     let create = unshare.iter().any(|kind| kind == "user");
-    let join = joins.iter().find(|(kind, _)| kind == "user").map(|(_, path)| path.clone());
+    let join = joins
+        .iter()
+        .find(|(kind, _)| kind == "user")
+        .map(|(_, path)| path.clone());
     unshare.retain(|kind| kind != "user");
     joins.retain(|(kind, _)| kind != "user");
     if create && join.is_some() {
@@ -390,7 +358,12 @@ fn prepare_user_namespace(unshare: &mut Vec<String>, joins: &mut Vec<(String, St
     let mut idmap_socks = [-1; 2];
     unsafe {
         if !requests.is_empty()
-            && libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, idmap_socks.as_mut_ptr()) != 0
+            && libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                0,
+                idmap_socks.as_mut_ptr(),
+            ) != 0
         {
             complain("idmap failed: socketpair");
             libc::_exit(78);
@@ -518,7 +491,10 @@ fn prepare_idmaps(pid: i32, sock: i32, requests: &[IdmapRequest]) -> bool {
     let path = std::ffi::CString::new(format!("/proc/{pid}/ns/user")).expect("user namespace");
     let userns = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if userns < 0 {
-        complain(&format!("idmap failed: open user namespace: {}", std::io::Error::last_os_error()));
+        complain(&format!(
+            "idmap failed: open user namespace: {}",
+            std::io::Error::last_os_error()
+        ));
         return false;
     }
     for request in requests {
@@ -531,7 +507,9 @@ fn prepare_idmaps(pid: i32, sock: i32, requests: &[IdmapRequest]) -> bool {
             unsafe { libc::close(userns) };
             return false;
         };
-        let mounted = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) } as i32;
+        let mounted =
+            unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, source.as_ptr(), flags) }
+                as i32;
         if mounted < 0 {
             complain(&idmap_failure("open_tree", &request.source));
             unsafe { libc::close(userns) };
@@ -571,7 +549,10 @@ fn prepare_idmaps(pid: i32, sock: i32, requests: &[IdmapRequest]) -> bool {
             return false;
         }
         if !send_fd(sock, mounted) {
-            complain(&format!("idmap failed: pass mount: {}", std::io::Error::last_os_error()));
+            complain(&format!(
+                "idmap failed: pass mount: {}",
+                std::io::Error::last_os_error()
+            ));
             unsafe {
                 libc::close(mounted);
                 libc::close(userns);
@@ -605,7 +586,10 @@ fn receive_idmaps(sock: i32, requests: &[IdmapRequest]) {
 fn send_fd(sock: i32, fd: i32) -> bool {
     unsafe {
         let mut byte = [1u8; 1];
-        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
         let space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as libc::c_uint) as usize;
         let mut buffer = vec![0u8; space];
         let mut msg: libc::msghdr = std::mem::zeroed();
@@ -629,7 +613,10 @@ fn send_fd(sock: i32, fd: i32) -> bool {
 fn recv_fd(sock: i32) -> Option<i32> {
     unsafe {
         let mut byte = [0u8; 1];
-        let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
         let space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as libc::c_uint) as usize;
         let mut buffer = vec![0u8; space];
         let mut msg: libc::msghdr = std::mem::zeroed();
@@ -641,7 +628,10 @@ fn recv_fd(sock: i32) -> Option<i32> {
             return None;
         }
         let hdr = libc::CMSG_FIRSTHDR(&msg);
-        if hdr.is_null() || (*hdr).cmsg_level != libc::SOL_SOCKET || (*hdr).cmsg_type != libc::SCM_RIGHTS {
+        if hdr.is_null()
+            || (*hdr).cmsg_level != libc::SOL_SOCKET
+            || (*hdr).cmsg_type != libc::SCM_RIGHTS
+        {
             return None;
         }
         Some(std::ptr::read_unaligned(libc::CMSG_DATA(hdr) as *const i32))
@@ -652,7 +642,9 @@ fn recv_fd(sock: i32) -> Option<i32> {
 fn idmap_failure(action: &str, path: &str) -> String {
     let err = std::io::Error::last_os_error();
     let prefix = match err.raw_os_error() {
-        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => "idmap is not supported",
+        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => {
+            "idmap is not supported"
+        }
         _ => "idmap failed",
     };
     format!("{prefix}: {action} {path}: {err}")
@@ -669,7 +661,10 @@ fn complain(message: &str) {
 #[cfg(target_os = "linux")]
 fn write_id_maps(pid: i32, uid_map: &str, gid_map: &str) -> std::io::Result<()> {
     std::fs::write(format!("/proc/{pid}/setgroups"), "deny")?;
-    if unsafe { libc::geteuid() } == 0 || (self_map(uid_map, unsafe { libc::geteuid() }) && self_map(gid_map, unsafe { libc::getegid() })) {
+    if unsafe { libc::geteuid() } == 0
+        || (self_map(uid_map, unsafe { libc::geteuid() })
+            && self_map(gid_map, unsafe { libc::getegid() }))
+    {
         std::fs::write(format!("/proc/{pid}/uid_map"), map_text(uid_map))?;
         return std::fs::write(format!("/proc/{pid}/gid_map"), map_text(gid_map));
     }
@@ -682,14 +677,22 @@ fn write_id_maps(pid: i32, uid_map: &str, gid_map: &str) -> std::io::Result<()> 
 #[cfg(target_os = "linux")]
 fn self_map(spec: &str, id: u32) -> bool {
     let mut ranges = spec.split(',').filter(|item| !item.is_empty());
-    let Some(only) = ranges.next() else { return false };
+    let Some(only) = ranges.next() else {
+        return false;
+    };
     if ranges.next().is_some() {
         return false;
     }
     let mut parts = only.split(':');
-    let Some(_container) = parts.next() else { return false };
-    let Some(host) = parts.next() else { return false };
-    let Some(size) = parts.next() else { return false };
+    let Some(_container) = parts.next() else {
+        return false;
+    };
+    let Some(host) = parts.next() else {
+        return false;
+    };
+    let Some(size) = parts.next() else {
+        return false;
+    };
     parts.next().is_none() && host == id.to_string() && size == "1"
 }
 
@@ -698,9 +701,15 @@ fn run_map_helper(program: &str, pid: i32, spec: &str) -> bool {
     let mut args = vec![program.to_string(), pid.to_string()];
     for item in spec.split(',').filter(|item| !item.is_empty()) {
         let mut parts = item.split(':');
-        let Some(container) = parts.next() else { return false };
-        let Some(host) = parts.next() else { return false };
-        let Some(size) = parts.next() else { return false };
+        let Some(container) = parts.next() else {
+            return false;
+        };
+        let Some(host) = parts.next() else {
+            return false;
+        };
+        let Some(size) = parts.next() else {
+            return false;
+        };
         if parts.next().is_some() {
             return false;
         }
@@ -710,7 +719,9 @@ fn run_map_helper(program: &str, pid: i32, spec: &str) -> bool {
     }
     let c_args: Vec<std::ffi::CString> = args
         .iter()
-        .map(|arg| std::ffi::CString::new(arg.clone()).unwrap_or_else(|_| unsafe { libc::_exit(89) }))
+        .map(|arg| {
+            std::ffi::CString::new(arg.clone()).unwrap_or_else(|_| unsafe { libc::_exit(89) })
+        })
         .collect();
     let mut argv: Vec<*const libc::c_char> = c_args.iter().map(|arg| arg.as_ptr()).collect();
     argv.push(std::ptr::null());
@@ -726,7 +737,9 @@ fn run_map_helper(program: &str, pid: i32, spec: &str) -> bool {
         }
         let status = wait_status(child);
         if status != 0 {
-            complain(&format!("rootless id mapping failed: {program} exited {status}"));
+            complain(&format!(
+                "rootless id mapping failed: {program} exited {status}"
+            ));
             return false;
         }
     }
@@ -738,9 +751,15 @@ fn map_text(spec: &str) -> String {
     let mut text = String::new();
     for item in spec.split(',').filter(|item| !item.is_empty()) {
         let mut parts = item.split(':');
-        let Some(container) = parts.next() else { unsafe { libc::_exit(89) } };
-        let Some(host) = parts.next() else { unsafe { libc::_exit(89) } };
-        let Some(size) = parts.next() else { unsafe { libc::_exit(89) } };
+        let Some(container) = parts.next() else {
+            unsafe { libc::_exit(89) }
+        };
+        let Some(host) = parts.next() else {
+            unsafe { libc::_exit(89) }
+        };
+        let Some(size) = parts.next() else {
+            unsafe { libc::_exit(89) }
+        };
         if parts.next().is_some() {
             unsafe { libc::_exit(89) };
         }
@@ -850,13 +869,20 @@ fn argument_value(name: &str) -> Option<String> {
         .filter(|part| !part.is_empty())
         .filter_map(|part| String::from_utf8(part.to_vec()).ok())
         .collect();
-    parts.windows(2).find(|pair| pair[0] == name).map(|pair| pair[1].clone())
+    parts
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
 }
 
 #[cfg(target_os = "linux")]
 fn write_pid(path: &std::ffi::CString, pid: i32) {
     unsafe {
-        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644);
+        let fd = libc::open(
+            path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        );
         if fd < 0 {
             libc::_exit(73);
         }
@@ -874,34 +900,36 @@ fn write_pid(path: &std::ffi::CString, pid: i32) {
 }
 
 #[cfg(target_os = "linux")]
-fn environ() -> *const *const libc::c_char {
-    unsafe extern "C" {
-        static environ: *mut *mut libc::c_char;
+fn preload_seccomp() {
+    for path in [
+        "/usr/lib/x86_64-linux-gnu/libseccomp.so.2",
+        "/lib/x86_64-linux-gnu/libseccomp.so.2",
+        "/usr/lib/aarch64-linux-gnu/libseccomp.so.2",
+        "/lib/aarch64-linux-gnu/libseccomp.so.2",
+        "/usr/lib64/libseccomp.so.2",
+        "/lib64/libseccomp.so.2",
+    ] {
+        let Ok(path) = std::ffi::CString::new(path) else {
+            continue;
+        };
+        let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        if !handle.is_null() {
+            return;
+        }
     }
-    unsafe { environ.cast() }
 }
-
 #[cfg(target_os = "linux")]
 fn enter_exec() {
-    // The native image is dynamically linked. After joining the container
-    // mount namespace it cannot be executed again, so this single-threaded
-    // stage execs the user program directly.
+    preload_seccomp();
+    if std::env::var_os("COAMING_EXEC_STAGE").is_some_and(|value| value == "jvm") {
+        return;
+    }
     let parts = cmdline_parts();
     let mut target = None;
     let mut pid_file = None;
-    let mut cwd = "/".to_string();
-    let mut envs = Vec::new();
     let mut detach = false;
-    let mut caps = None;
-    let mut no_new_privs = false;
-    let mut identity = None;
-    let mut rlimits = None;
-    let mut oom = None;
-    let mut apparmor = None;
     let mut console = None;
-    let mut seccomp = None;
-    let mut user = Vec::new();
-    let mut index = 2usize;
+    let mut index = 0usize;
     while index < parts.len() {
         match parts[index].as_str() {
             "--pid" => {
@@ -912,141 +940,323 @@ fn enter_exec() {
                 pid_file = parts.get(index + 1).cloned();
                 index += 2;
             }
-            "--cwd" => {
-                cwd = parts.get(index + 1).cloned().unwrap_or_else(|| "/".to_string());
-                index += 2;
-            }
-            "--env" => {
-                if let Some(value) = parts.get(index + 1) {
-                    envs.push(value.clone());
-                }
-                index += 2;
-            }
             "--detach" => {
                 detach = true;
                 index += 1;
-            }
-            "--caps" => {
-                caps = parts.get(index + 1).cloned();
-                index += 2;
-            }
-            "--no-new-privs" => {
-                no_new_privs = true;
-                index += 1;
-            }
-            "--user" => {
-                identity = parts.get(index + 1).cloned();
-                index += 2;
-            }
-            "--rlimits" => {
-                rlimits = parts.get(index + 1).cloned();
-                index += 2;
-            }
-            "--oom" => {
-                oom = parts.get(index + 1).cloned();
-                index += 2;
-            }
-            "--apparmor" => {
-                apparmor = parts.get(index + 1).cloned();
-                index += 2;
             }
             "--console" => {
                 console = parts.get(index + 1).cloned();
                 index += 2;
             }
-            "--seccomp" => {
-                seccomp = parts.get(index + 1).cloned();
-                index += 2;
-            }
-            "--" => {
-                user.extend(parts[index + 1..].iter().cloned());
-                break;
-            }
-            _ => unsafe { libc::_exit(82) },
+            _ => index += 1,
         }
     }
     let Some(target) = target else {
         unsafe { libc::_exit(77) };
     };
-    if user.is_empty() {
-        unsafe { libc::_exit(82) };
-    }
-    let seccomp_rules = match seccomp.as_deref() {
-        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
-        None => String::new(),
-    };
-    let mut pipes = [0; 2];
-    unsafe {
-        if libc::pipe(pipes.as_mut_ptr()) != 0 {
-            libc::_exit(84);
-        }
-        let pid = libc::fork();
-        if pid < 0 {
-            libc::_exit(79);
-        }
-        if pid > 0 {
-            libc::close(pipes[1]);
-            let user_pid = read_i32(pipes[0]);
-            libc::close(pipes[0]);
-            if let Some(pid_file) = pid_file {
-                let pid_path = std::ffi::CString::new(pid_file).expect("exec pid path");
-                write_pid(&pid_path, user_pid);
-            }
-            let status = wait_status(pid);
-            libc::_exit(if detach { 0 } else { status });
-        }
-        libc::close(pipes[0]);
-    }
-    // The console socket is on the host. Connect before setns, or the path
-    // disappears with the container mount namespace and the shim waits forever.
     let tty_slave = if let Some(socket) = console.as_deref() {
         let (master, slave) = open_pty();
         send_console(socket, master);
         unsafe { libc::close(master) };
+        set_env("COAMING_TTY_FD", &slave.to_string());
         slave
     } else {
         -1
     };
-    let seccomp_api = if seccomp_rules.is_empty() { None } else { Some(open_seccomp_api()) };
     let mounts = open_namespace(&target, "mnt", false);
     let uts = open_namespace(&target, "uts", false);
     let ipc = open_namespace(&target, "ipc", false);
     let net = open_namespace(&target, "net", false);
     let cgroup = open_namespace(&target, "cgroup", false);
     let pidns = open_namespace(&target, "pid", true);
+    // Fork before setns so the parent can still write the host pid file.
+    let mut pipe = [0; 2];
+    unsafe {
+        if libc::pipe(pipe.as_mut_ptr()) != 0 {
+            libc::_exit(84);
+        }
+        let middle = libc::fork();
+        if middle < 0 {
+            libc::_exit(79);
+        }
+        if middle > 0 {
+            libc::close(pipe[1]);
+            if tty_slave >= 0 {
+                libc::close(tty_slave);
+            }
+            let host_pid = read_i32(pipe[0]);
+            libc::close(pipe[0]);
+            if let Some(pid_file) = pid_file {
+                let pid_path = std::ffi::CString::new(pid_file).unwrap_or_else(|_| libc::_exit(73));
+                write_pid(&pid_path, host_pid);
+            }
+            if detach {
+                libc::_exit(0);
+            }
+            let status = wait_status(middle);
+            libc::_exit(status);
+        }
+        libc::close(pipe[0]);
+    }
     enter_namespace(mounts, false);
     enter_namespace(uts, false);
     enter_namespace(ipc, false);
     enter_namespace(net, false);
     enter_namespace(cgroup, false);
     enter_namespace(pidns, true);
-    let grand = unsafe { libc::fork() };
-    if grand < 0 {
+    let child = unsafe { libc::fork() };
+    if child < 0 {
         unsafe { libc::_exit(79) };
     }
-    if grand > 0 {
+    if child > 0 {
         if tty_slave >= 0 {
             unsafe { libc::close(tty_slave) };
         }
-        let host_pid = host_pid_of(grand);
-        let text = host_pid.to_string();
-        write_all(pipes[1], text.as_bytes());
-        unsafe { libc::close(pipes[1]) };
+        let host_pid = host_pid_of(child);
+        write_all(pipe[1], host_pid.to_string().as_bytes());
+        unsafe { libc::close(pipe[1]) };
         if detach {
             unsafe { libc::_exit(0) };
         }
-        let status = wait_status(grand);
+        let status = wait_status(child);
         unsafe { libc::_exit(status) };
     }
-    unsafe { libc::close(pipes[1]) };
+    unsafe { libc::close(pipe[1]) };
+    finish_exec();
+}
+
+#[cfg(target_os = "linux")]
+fn open_pty() -> (i32, i32) {
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::_exit(97);
+        }
+        let mut name = [0 as libc::c_char; 128];
+        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+            libc::_exit(97);
+        }
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+        if slave < 0 {
+            libc::_exit(97);
+        }
+        if libc::fcntl(slave, libc::F_SETFD, 0) != 0 {
+            libc::_exit(97);
+        }
+        (master, slave)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_console(path: &str, fd: i32) {
+    unsafe {
+        let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if sock < 0 {
+            libc::_exit(96);
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_bytes();
+        if bytes.len() + 1 > addr.sun_path.len() {
+            libc::_exit(96);
+        }
+        for (index, byte) in bytes.iter().enumerate() {
+            addr.sun_path[index] = *byte as libc::c_char;
+        }
+        let length = std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1;
+        if libc::connect(
+            sock,
+            (&addr as *const libc::sockaddr_un).cast(),
+            length as libc::socklen_t,
+        ) != 0
+        {
+            libc::_exit(96);
+        }
+        if !send_fd(sock, fd) {
+            libc::_exit(96);
+        }
+        libc::close(sock);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cmdline_parts() -> Vec<String> {
+    std::fs::read("/proc/self/cmdline")
+        .unwrap_or_default()
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| String::from_utf8(part.to_vec()).ok())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn open_namespace(pid: &str, name: &str, required: bool) -> i32 {
+    let path = std::ffi::CString::new(format!("/proc/{pid}/ns/{name}")).expect("namespace path");
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 && required {
+        unsafe { libc::_exit(76) };
+    }
+    fd
+}
+
+#[cfg(target_os = "linux")]
+fn enter_namespace(fd: i32, required: bool) {
+    if fd < 0 {
+        return;
+    }
+    let rc = unsafe { libc::setns(fd, 0) };
+    unsafe { libc::close(fd) };
+    if rc != 0 && required {
+        unsafe { libc::_exit(76) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn host_pid_of(pid: i32) -> i32 {
+    let path = format!("/proc/{pid}/status");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    host_pid_from_status(&text, pid)
+}
+
+fn host_pid_from_status(text: &str, fallback: i32) -> i32 {
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("NSpid:") else {
+            continue;
+        };
+        // The first id is the pid in the outermost namespace, which is what containerd kills.
+        if let Some(value) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|item| item.parse().ok())
+        {
+            if value > 0 {
+                return value;
+            }
+        }
+    }
+    fallback
+}
+
+#[cfg(target_os = "linux")]
+fn read_i32(fd: i32) -> i32 {
+    let mut buf = [0u8; 32];
+    let mut used = 0usize;
+    unsafe {
+        loop {
+            if used == buf.len() {
+                break;
+            }
+            let read = libc::read(fd, buf[used..].as_mut_ptr().cast(), buf.len() - used);
+            if read < 0 {
+                libc::_exit(86);
+            }
+            if read == 0 {
+                break;
+            }
+            used += read as usize;
+        }
+    }
+    let text = std::str::from_utf8(&buf[..used]).unwrap_or("");
+    text.trim()
+        .parse()
+        .unwrap_or_else(|_| unsafe { libc::_exit(86) })
+}
+#[cfg(target_os = "linux")]
+fn write_all(fd: i32, bytes: &[u8]) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let wrote = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        if wrote < 0 {
+            unsafe { libc::_exit(86) };
+        }
+        rest = &rest[wrote as usize..];
+    }
+}
+#[cfg(target_os = "linux")]
+fn wait_status(pid: i32) -> i32 {
+    let mut status = 0;
+    unsafe {
+        loop {
+            let rc = libc::waitpid(pid, &mut status, 0);
+            if rc < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                libc::_exit(85);
+            }
+            break;
+        }
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
+        } else {
+            1
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_env(key: &str, value: &str) {
+    let key = std::ffi::CString::new(key).expect("probe env key");
+    let value = std::ffi::CString::new(value).expect("probe env value");
+    unsafe {
+        libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::host_pid_from_status;
+
+    #[test]
+    fn outermost_nspid_is_the_host_pid() {
+        assert_eq!(host_pid_from_status("Pid:\t2\nNSpid:\t4242\t2\n", 2), 4242);
+        assert_eq!(host_pid_from_status("Pid:\t9\n", 9), 9);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn finish_exec() -> ! {
+    let parts = cmdline_parts();
+    let mut envs = Vec::new();
+    let mut user = Vec::new();
+    let mut index = 0usize;
+    while index < parts.len() {
+        match parts[index].as_str() {
+            "--env" => {
+                if let Some(value) = parts.get(index + 1) {
+                    envs.push(value.clone());
+                }
+                index += 2;
+            }
+            "--" => {
+                user.extend(parts[index + 1..].iter().cloned());
+                break;
+            }
+            _ => index += 1,
+        }
+    }
+    if user.is_empty() {
+        unsafe { libc::_exit(82) };
+    }
+    let cwd = std::env::var("COAMING_EXEC_CWD").unwrap_or_else(|_| "/".to_string());
+    let caps = std::env::var("COAMING_EXEC_CAPS").ok();
+    let identity = std::env::var("COAMING_EXEC_USER").ok();
+    let rlimits = std::env::var("COAMING_EXEC_RLIMITS").ok();
+    let oom = std::env::var("COAMING_EXEC_OOM").ok();
+    let apparmor = std::env::var("COAMING_EXEC_APPARMOR").ok();
+    let no_new_privs = std::env::var("COAMING_EXEC_NNP").ok().as_deref() == Some("1");
+    let seccomp_rules = std::env::var("COAMING_EXEC_SECCOMP").unwrap_or_default();
+    let tty_slave = std::env::var("COAMING_TTY_FD")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(-1);
     if tty_slave >= 0 {
         claim_tty(tty_slave);
     }
     if cwd != "/" {
-        let path = match std::ffi::CString::new(cwd) {
-            Ok(value) => value,
-            Err(_) => unsafe { libc::_exit(87) },
-        };
+        let path = std::ffi::CString::new(cwd).unwrap_or_else(|_| unsafe { libc::_exit(87) });
         if unsafe { libc::chdir(path.as_ptr()) } != 0 {
             unsafe { libc::_exit(87) };
         }
@@ -1057,28 +1267,36 @@ fn enter_exec() {
     if let Some(spec) = caps.as_deref() {
         drop_bounding(spec);
     }
-    apply_identity(oom.as_deref(), rlimits.as_deref(), identity.as_deref(), caps.is_some());
+    apply_identity(
+        oom.as_deref(),
+        rlimits.as_deref(),
+        identity.as_deref(),
+        caps.is_some(),
+    );
     if let Some(spec) = caps.as_deref() {
         commit_capabilities(spec);
     }
     if no_new_privs && unsafe { libc::prctl(38, 1, 0, 0, 0) } != 0 {
         unsafe { libc::_exit(91) };
     }
-    if let Some(api) = seccomp_api {
-        if !seccomp_rules.is_empty() {
-            install_seccomp_rules(&seccomp_rules, &api);
-        }
+    if !seccomp_rules.is_empty() {
+        let api = open_seccomp_api();
+        install_seccomp_rules(&seccomp_rules, &api);
     }
     if let Some(program) = user.first().cloned() {
         user[0] = resolve_program(&program, &envs);
     }
     let argv_owned: Vec<std::ffi::CString> = user
         .iter()
-        .map(|arg| std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) }))
+        .map(|arg| {
+            std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) })
+        })
         .collect();
     let env_owned: Vec<std::ffi::CString> = envs
         .iter()
-        .map(|arg| std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) }))
+        .map(|arg| {
+            std::ffi::CString::new(arg.as_str()).unwrap_or_else(|_| unsafe { libc::_exit(82) })
+        })
         .collect();
     let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|arg| arg.as_ptr()).collect();
     argv.push(std::ptr::null());
@@ -1089,9 +1307,6 @@ fn enter_exec() {
         libc::_exit(80);
     }
 }
-
-
-
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -1104,7 +1319,6 @@ struct SeccompArg {
 }
 
 #[cfg(target_os = "linux")]
-
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct SeccompApi {
@@ -1121,7 +1335,11 @@ struct SeccompApi {
 fn open_seccomp_api() -> SeccompApi {
     unsafe {
         let path = std::ffi::CString::new("/tmp/coaming-seccomp.log").unwrap();
-        let log = libc::open(path.as_ptr(), libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC, 0o644);
+        let log = libc::open(
+            path.as_ptr(),
+            libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+            0o644,
+        );
         let library = std::ffi::CString::new("libseccomp.so.2").unwrap();
         let handle = libc::dlopen(library.as_ptr(), libc::RTLD_NOW);
         if handle.is_null() {
@@ -1148,7 +1366,10 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
         let mut parts = line.split_whitespace();
         match parts.next() {
             Some("DEFAULT") => {
-                default_action = parts.next().and_then(|value| value.parse().ok()).unwrap_or(default_action);
+                default_action = parts
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(default_action);
             }
             Some("RULE") => {
                 let Some(action) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
@@ -1159,11 +1380,24 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
                 let mut args = Vec::new();
                 let mut index = 0;
                 while index + 3 < numbers.len() {
-                    let Ok(arg_index) = numbers[index].parse::<u32>() else { break };
-                    let Ok(op) = numbers[index + 1].parse::<u32>() else { break };
-                    let Ok(value) = numbers[index + 2].parse::<u64>() else { break };
-                    let Ok(value_two) = numbers[index + 3].parse::<u64>() else { break };
-                    args.push(SeccompArg { index: arg_index, op, value, value_two });
+                    let Ok(arg_index) = numbers[index].parse::<u32>() else {
+                        break;
+                    };
+                    let Ok(op) = numbers[index + 1].parse::<u32>() else {
+                        break;
+                    };
+                    let Ok(value) = numbers[index + 2].parse::<u64>() else {
+                        break;
+                    };
+                    let Ok(value_two) = numbers[index + 3].parse::<u64>() else {
+                        break;
+                    };
+                    args.push(SeccompArg {
+                        index: arg_index,
+                        op,
+                        value,
+                        value_two,
+                    });
                     index += 4;
                 }
                 rules.push((action, name.to_string(), args));
@@ -1188,14 +1422,21 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
             }
             let groups = seccomp_rule_groups(args);
             for group in groups {
-                let pointer = if group.is_empty() { std::ptr::null() } else { group.as_ptr() };
+                let pointer = if group.is_empty() {
+                    std::ptr::null()
+                } else {
+                    group.as_ptr()
+                };
                 let rc = (api.add)(context, *action, number, group.len() as u32, pointer);
                 if rc == -13 {
                     // Same refusal as the Java loader: the rule only repeats the default action.
                     continue;
                 }
                 if rc != 0 {
-                    seccomp_note(api.log, &format!("add {name} number={number} args={} rc={rc}", group.len()));
+                    seccomp_note(
+                        api.log,
+                        &format!("add {name} number={number} args={} rc={rc}", group.len()),
+                    );
                     (api.release)(context);
                     libc::_exit(94);
                 }
@@ -1207,7 +1448,13 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
         let attr_skip = (api.attr)(context, 5, 1);
         let loaded = (api.load)(context);
         if attr_nnp != 0 || attr_sync != 0 || attr_skip != 0 || loaded != 0 {
-            seccomp_note(api.log, &format!("load nnp={attr_nnp} sync={attr_sync} skip={attr_skip} load={loaded} rules={}", rules.len()));
+            seccomp_note(
+                api.log,
+                &format!(
+                    "load nnp={attr_nnp} sync={attr_sync} skip={attr_skip} load={loaded} rules={}",
+                    rules.len()
+                ),
+            );
             (api.release)(context);
             libc::_exit(94);
         }
@@ -1216,7 +1463,6 @@ fn install_seccomp_rules(text: &str, api: &SeccompApi) {
 }
 
 #[cfg(target_os = "linux")]
-
 #[cfg(target_os = "linux")]
 fn seccomp_note(log: i32, message: &str) {
     if log < 0 {
@@ -1250,28 +1496,6 @@ unsafe fn load_symbol<T>(handle: *mut libc::c_void, name: &str) -> T {
 }
 
 #[cfg(target_os = "linux")]
-fn open_pty() -> (i32, i32) {
-    unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        if master < 0 || libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
-            libc::_exit(97);
-        }
-        let mut name = [0 as libc::c_char; 128];
-        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
-            libc::_exit(97);
-        }
-        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
-        if slave < 0 {
-            libc::_exit(97);
-        }
-        if libc::fcntl(slave, libc::F_SETFD, 0) != 0 {
-            libc::_exit(97);
-        }
-        (master, slave)
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn claim_tty(slave: i32) {
     unsafe {
         if libc::setsid() < 0 {
@@ -1292,33 +1516,7 @@ fn claim_tty(slave: i32) {
 }
 
 #[cfg(target_os = "linux")]
-fn send_console(path: &str, fd: i32) {
-    unsafe {
-        let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-        if sock < 0 {
-            libc::_exit(96);
-        }
-        let mut addr: libc::sockaddr_un = std::mem::zeroed();
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let bytes = path.as_bytes();
-        if bytes.len() + 1 > addr.sun_path.len() {
-            libc::_exit(96);
-        }
-        for (index, byte) in bytes.iter().enumerate() {
-            addr.sun_path[index] = *byte as libc::c_char;
-        }
-        let length = std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1;
-        if libc::connect(sock, (&addr as *const libc::sockaddr_un).cast(), length as libc::socklen_t) != 0 {
-            libc::_exit(96);
-        }
-        if !send_fd(sock, fd) {
-            libc::_exit(96);
-        }
-        libc::close(sock);
-    }
-}
 
-#[cfg(target_os = "linux")]
 fn drop_bounding(spec: &str) {
     let (_, _, _, bounding, _) = capability_sets(spec);
     unsafe {
@@ -1392,7 +1590,12 @@ fn set_apparmor(profile: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_identity(oom: Option<&str>, rlimits: Option<&str>, identity: Option<&str>, keep_capabilities: bool) {
+fn apply_identity(
+    oom: Option<&str>,
+    rlimits: Option<&str>,
+    identity: Option<&str>,
+    keep_capabilities: bool,
+) {
     if let Some(score) = oom {
         if std::fs::write("/proc/self/oom_score_adj", score).is_err() {
             unsafe { libc::_exit(92) };
@@ -1406,7 +1609,9 @@ fn apply_identity(oom: Option<&str>, rlimits: Option<&str>, identity: Option<&st
             let Some((soft, hard)) = bounds.split_once(':') else {
                 unsafe { libc::_exit(93) };
             };
-            let resource: u32 = resource.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
+            let resource: u32 = resource
+                .parse()
+                .unwrap_or_else(|_| unsafe { libc::_exit(93) });
             let soft: u64 = soft.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
             let hard: u64 = hard.parse().unwrap_or_else(|_| unsafe { libc::_exit(93) });
             let value = [soft, hard];
@@ -1419,8 +1624,16 @@ fn apply_identity(oom: Option<&str>, rlimits: Option<&str>, identity: Option<&st
         return;
     };
     let mut fields = identity.split(':');
-    let uid: u32 = fields.next().unwrap_or("").parse().unwrap_or_else(|_| unsafe { libc::_exit(94) });
-    let gid: u32 = fields.next().unwrap_or("").parse().unwrap_or_else(|_| unsafe { libc::_exit(94) });
+    let uid: u32 = fields
+        .next()
+        .unwrap_or("")
+        .parse()
+        .unwrap_or_else(|_| unsafe { libc::_exit(94) });
+    let gid: u32 = fields
+        .next()
+        .unwrap_or("")
+        .parse()
+        .unwrap_or_else(|_| unsafe { libc::_exit(94) });
     let groups: Vec<u32> = fields
         .next()
         .unwrap_or("")
@@ -1463,137 +1676,4 @@ fn resolve_program(program: &str, env: &[String]) -> String {
         }
     }
     program.to_string()
-}
-
-#[cfg(target_os = "linux")]
-fn cmdline_parts() -> Vec<String> {
-    std::fs::read("/proc/self/cmdline")
-        .unwrap_or_default()
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| String::from_utf8(part.to_vec()).ok())
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn open_namespace(pid: &str, name: &str, required: bool) -> i32 {
-    let path = std::ffi::CString::new(format!("/proc/{pid}/ns/{name}")).expect("namespace path");
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-    if fd < 0 && required {
-        unsafe { libc::_exit(76) };
-    }
-    fd
-}
-
-#[cfg(target_os = "linux")]
-fn enter_namespace(fd: i32, required: bool) {
-    if fd < 0 {
-        return;
-    }
-    let rc = unsafe { libc::setns(fd, 0) };
-    unsafe { libc::close(fd) };
-    if rc != 0 && required {
-        unsafe { libc::_exit(76) };
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn host_pid_of(pid: i32) -> i32 {
-    let path = format!("/proc/{pid}/status");
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    host_pid_from_status(&text, pid)
-}
-
-fn host_pid_from_status(text: &str, fallback: i32) -> i32 {
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("NSpid:") else {
-            continue;
-        };
-        // The first id is the pid in the outermost namespace, which is what containerd kills.
-        if let Some(value) = rest.split_whitespace().next().and_then(|item| item.parse().ok()) {
-            if value > 0 {
-                return value;
-            }
-        }
-    }
-    fallback
-}
-
-#[cfg(target_os = "linux")]
-fn read_i32(fd: i32) -> i32 {
-    let mut buf = [0u8; 32];
-    let mut used = 0usize;
-    unsafe {
-        loop {
-            if used == buf.len() {
-                break;
-            }
-            let read = libc::read(fd, buf[used..].as_mut_ptr().cast(), buf.len() - used);
-            if read < 0 {
-                libc::_exit(86);
-            }
-            if read == 0 {
-                break;
-            }
-            used += read as usize;
-        }
-    }
-    let text = std::str::from_utf8(&buf[..used]).unwrap_or("");
-    text.trim().parse().unwrap_or_else(|_| unsafe { libc::_exit(86) })
-}
-
-#[cfg(target_os = "linux")]
-fn write_all(fd: i32, bytes: &[u8]) {
-    let mut rest = bytes;
-    while !rest.is_empty() {
-        let wrote = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
-        if wrote < 0 {
-            unsafe { libc::_exit(86) };
-        }
-        rest = &rest[wrote as usize..];
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn wait_status(pid: i32) -> i32 {
-    let mut status = 0;
-    unsafe {
-        loop {
-            let rc = libc::waitpid(pid, &mut status, 0);
-            if rc < 0 {
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                libc::_exit(85);
-            }
-            break;
-        }
-        if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else if libc::WIFSIGNALED(status) {
-            128 + libc::WTERMSIG(status)
-        } else {
-            1
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn set_env(key: &str, value: &str) {
-    let key = std::ffi::CString::new(key).expect("probe env key");
-    let value = std::ffi::CString::new(value).expect("probe env value");
-    unsafe {
-        libc::setenv(key.as_ptr(), value.as_ptr(), 1);
-    }
-}
-
-#[cfg(test)]
-mod pid_tests {
-    use super::host_pid_from_status;
-
-    #[test]
-    fn outermost_nspid_is_the_host_pid() {
-        assert_eq!(host_pid_from_status("Pid:\t2\nNSpid:\t4242\t2\n", 2), 4242);
-        assert_eq!(host_pid_from_status("Pid:\t9\n", 9), 9);
-    }
 }

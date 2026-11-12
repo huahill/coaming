@@ -131,7 +131,7 @@ jobs:
           cat > release-notes.md <<'EOF'
           Linux amd64 and arm64, built by GitHub Actions from this tag.
 
-          Each archive contains `coaming` and `coaming-runtime` for one architecture. Keep the two files from the same archive together. Point containerd `BinaryName` or cri-o `runtime_path` at `coaming`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
+          Each archive contains one `coaming` binary for that architecture, the native image. Point containerd `BinaryName` or cri-o `runtime_path` at `coaming`, then restart only that service. To roll back, point the same setting at the previous runtime and restart only that service.
 
           The recorded critest run is amd64. The arm64 archive has not been through that suite.
 
